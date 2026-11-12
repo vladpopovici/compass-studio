@@ -112,8 +112,14 @@ point and polygon layers, GPU picking and filtering. WebGPU is **not** a
 baseline: as of 2026-11 browser support on Linux still sits behind flags or is
 in progress, and deck.gl's WebGPU support is partial. Revisit later.
 Fallback if the editing spike (S5) fails: OpenLayers (built-in draw, modify and
-snap interactions, custom pixel projections). **[verify]** coordinate precision
-at ~200k px and deep zoom (float32 jitter) in S2.
+snap interactions, custom pixel projections). Coordinate precision (S2,
+workstation, 2026-11-12; laptop confirmation pending): no motion jitter up to
+262k px and 256x overzoom; absolute level-0 coordinates are exact through
+accessor-built layers and BitmapLayer bounds; float32 binary positions give a
+static offset of at most 1/128 px x 2^zoom at 131k to 262k px (1 px at 128x
+overzoom), acceptable for annotation buffers. `coordinateOrigin` has no effect
+for CARTESIAN data in an OrthographicView, and `modelMatrix` does not recover
+precision. Details: `docs/spikes/S2.md`.
 
 ### D6. Annotation delivery
 - Points: the whole layer as binary buffers (x, y, class, object id), GPU

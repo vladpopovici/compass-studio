@@ -11,13 +11,20 @@ dependencies = [
     "crc32c>=2.7",
     "shapely>=2.1.2,<3.0.0",
     "pyarrow>=18",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "pillow>=11",
 ]
 
 [project.scripts]
 compass-studio-synth = "compass_studio.synth.cli:main"
+compass-studio-serve = "compass_studio.serve:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -28,3 +35,8 @@ packages = ["src/compass_studio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# Supply-chain hygiene: resolve only releases at least ~two weeks old.
+# Move the date forward deliberately when upgrading.
+exclude-newer = "2026-10-29T00:00:00Z"

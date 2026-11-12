@@ -1,0 +1,2 @@
+# Supply-chain hygiene: install only releases at least 14 days old.
+minimumReleaseAge: 20160
