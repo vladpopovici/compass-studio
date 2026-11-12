@@ -1,0 +1,16 @@
+CLAUDE.md
+.claude/
+data/
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Web
+node_modules/
+dist/
+
+# Spike outputs (summaries go to docs/spikes/)
+spikes/*/results/

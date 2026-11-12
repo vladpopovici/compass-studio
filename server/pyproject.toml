@@ -1,0 +1,30 @@
+[project]
+name = "compass-studio-server"
+version = "0.0.1"
+description = "Local server for CompassStudio: tiles and annotation queries over COMPASS stores"
+authors = [{name = "Vlad Popovici", email = "popovici@bioxlab.org"}]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "zarr>=3.0.8",
+    "numcodecs>=0.15",
+    "crc32c>=2.7",
+    "shapely>=2.1.2,<3.0.0",
+    "pyarrow>=18",
+]
+
+[project.scripts]
+compass-studio-synth = "compass_studio.synth.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/compass_studio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
