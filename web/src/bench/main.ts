@@ -73,7 +73,10 @@ async function main() {
   const id = params.get("image") ?? images[0].id;
   const info = images.find((i) => i.id === id);
   if (!info) throw new Error(`no image ${id}`);
-  if (bench === "pan") await runPan(info, hud, params.get("tiles") ?? "tuned");
+  const labelsId = params.get("labels");
+  const labels = labelsId ? images.find((i) => i.id === labelsId) ?? null : null;
+  if (labelsId && !labels) throw new Error(`no label map ${labelsId}`);
+  if (bench === "pan") await runPan(info, hud, params.get("tiles") ?? "tuned", labels, params.get("outline") === "1");
   else await interactive(info);
 }
 

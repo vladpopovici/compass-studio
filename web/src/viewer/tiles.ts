@@ -40,6 +40,15 @@ export class TileStats {
   cached = 0;
 
   async fetchTile(path: string, signal?: AbortSignal): Promise<ImageBitmap> {
+    return this.fetchAs(path, signal, async (r) => createImageBitmap(await r.blob()));
+  }
+
+  /** The tile's bytes, timed like an image tile (label maps). */
+  async fetchBytes(path: string, signal?: AbortSignal): Promise<Uint8Array> {
+    return this.fetchAs(path, signal, async (r) => new Uint8Array(await r.arrayBuffer()));
+  }
+
+  private async fetchAs<T>(path: string, signal: AbortSignal | undefined, decode: (r: Response) => Promise<T>): Promise<T> {
     const rec: TileRec = { t0: performance.now() };
     this.recs.push(rec);
     this.inflight++;
@@ -52,9 +61,9 @@ export class TileStats {
         const m = part.trim().match(/^(read|encode);dur=([\d.]+)/);
         if (m) rec[m[1] as "read" | "encode"] = parseFloat(m[2]);
       }
-      const bmp = await createImageBitmap(await r.blob());
+      const out = await decode(r);
       rec.loaded = performance.now();
-      return bmp;
+      return out;
     } catch (e) {
       rec.failed = true;
       throw e;

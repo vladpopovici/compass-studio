@@ -7,11 +7,14 @@
 // read/encode times from Server-Timing, and per frame the share of on-screen
 // tiles shown at the target level ("sharp").
 // &tiles=<preset> picks the tile loading options (TILE_PRESETS, default tuned).
+// &labels=<id> draws that label map over the image (&outline=1: outlines);
+// its tiles are timed separately ("label_tiles").
 
 import { Deck, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
 import { getBlob, postResults, type ImageInfo } from "../api";
 import { environment, nextFrame, percentiles } from "./env";
 import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats } from "../viewer/tiles";
+import { DEFAULT_STYLE, LabelSource } from "../viewer/labels";
 
 interface TileHeader { isLoaded: boolean; isSelected: boolean; bbox: { left: number; top: number; right: number; bottom: number } }
 
@@ -73,10 +76,13 @@ function flight(info: ImageInfo, box: [number, number, number, number]): Phase[]
   return phases;
 }
 
-export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tuned") {
+export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tuned",
+                             labels: ImageInfo | null = null, outline = false) {
   const preset = TILE_PRESETS[presetName];
   if (!preset) throw new Error(`no tile preset ${presetName}`);
   let stats = new TileStats();
+  let labelStats = new TileStats();
+  const style = { ...DEFAULT_STYLE, outline };
   const vs = (x: number, y: number, z: number): OrthographicViewState =>
     ({ target: [x, y, 0], zoom: z });
   let gl: WebGL2RenderingContext | null = null;
@@ -92,6 +98,7 @@ export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tu
       const now = performance.now();
       renderMs.push(now - renderStart);
       stats.markDrawn(now);
+      labelStats.markDrawn(now);
     },
   });
   const box = await tissueBox(info);
@@ -101,12 +108,19 @@ export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tu
 
   for (const run of ["cold", "http", "resident"]) {
     stats = new TileStats();
+    labelStats = new TileStats();
     if (run !== "resident") {
       const layer = makeTileLayer(info, stats, bust, preset);
-      deck.setProps({ layers: [layer.clone({ id: `${layer.id}-${run}` })] });
+      const layers = [layer.clone({ id: `${layer.id}-${run}` })];
+      if (labels) {
+        const src = new LabelSource(labels, preset, labelStats, bust);
+        src.setStyle(style);
+        const l = src.layer(style);
+        layers.push(l.clone({ id: `${l.id}-${run}` }) as never);
+      }
+      deck.setProps({ layers });
     } else {
-      const [layer] = deck.props.layers as ReturnType<typeof makeTileLayer>[];
-      deck.setProps({ layers: [layer] });
+      deck.setProps({ layers: [...deck.props.layers] });
     }
     const phaseOut: Record<string, unknown>[] = [];
     for (const ph of phases) {
@@ -143,12 +157,14 @@ export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tu
     }
     // let outstanding tiles land before summarising
     const until = performance.now() + 3000;
-    while (stats.inflight > 0 && performance.now() < until) await nextFrame();
-    runs.push({ run, phases: phaseOut, tiles: stats.summary() });
+    while (stats.inflight + labelStats.inflight > 0 && performance.now() < until) await nextFrame();
+    runs.push({ run, phases: phaseOut, tiles: stats.summary(),
+                ...(labels ? { label_tiles: labelStats.summary() } : {}) });
   }
 
   const result = { spike: "S2", bench: "pan", tiles: { preset: presetName, ...preset,
-    uploadsPerFrame: Number.isFinite(preset.uploadsPerFrame) ? preset.uploadsPerFrame : null }, image: { id: info.id, kind: info.kind,
+    uploadsPerFrame: Number.isFinite(preset.uploadsPerFrame) ? preset.uploadsPerFrame : null },
+    labels: labels ? { id: labels.id, dtype: labels.dtype, outline } : null, image: { id: info.id, kind: info.kind,
     width: info.width, height: info.height, levels: info.levels.length }, tissue_box: box,
     environment: environment(gl), deck_version: (await import("@deck.gl/core")).VERSION, runs };
   const saved = await postResults("s2-pan", result);

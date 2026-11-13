@@ -11,7 +11,7 @@ import { TileLayer } from "@deck.gl/geo-layers";
 import type { DefaultProps, UpdateParameters } from "@deck.gl/core";
 import type { Device, Texture, TextureFormat } from "@luma.gl/core";
 import { authHeaders, type ImageInfo } from "../api";
-import { ringTileset, TILE_PRESETS, type TileOptions } from "./tiles";
+import { ringTileset, TILE_PRESETS, type TileOptions, type TileStats } from "./tiles";
 
 /** Okabe-Ito, as COMPASS's viewer (overlay.DEFAULT_PALETTE). */
 export const DEFAULT_PALETTE = ["#e69f00", "#56b4e9", "#009e73", "#f0e442", "#0072b2", "#d55e00", "#cc79a7", "#999999"];
@@ -71,7 +71,9 @@ export class LabelSource {
   private paletteTexture: Texture | null = null;
   private styleKey = "";
 
-  constructor(readonly info: ImageInfo, private options: TileOptions = TILE_PRESETS.tuned) {
+  constructor(readonly info: ImageInfo, private options: TileOptions = TILE_PRESETS.tuned,
+              /** optional timing of layer tiles (benches) */
+              readonly stats?: TileStats, private bust = "") {
     const b = BYTES[info.dtype ?? "uint8"];
     if (!b) throw new Error(`label dtype ${info.dtype} not supported`);
     this.bytes = b;
@@ -162,11 +164,16 @@ export class LabelSource {
   }
 
   private async fetchTile(level: number, col: number, row: number, signal?: AbortSignal): Promise<LabelTile> {
-    const q = this.info.version ? `?v=${encodeURIComponent(this.info.version)}` : "";
-    const r = await fetch(`api/v1/images/${this.info.id}/tiles/${level}/${col}/${row}.bin${q}`,
-                          { headers: authHeaders, signal });
-    if (!r.ok) throw new Error(`label tile: ${r.status}`);
-    const data = new Uint8Array(await r.arrayBuffer());
+    const v = this.bust || this.info.version;
+    const q = v ? `?v=${encodeURIComponent(v)}` : "";
+    const path = `images/${this.info.id}/tiles/${level}/${col}/${row}.bin${q}`;
+    let data: Uint8Array;
+    if (this.stats && signal) data = await this.stats.fetchBytes(path, signal);
+    else {
+      const r = await fetch(`api/v1/${path}`, { headers: authHeaders, signal });
+      if (!r.ok) throw new Error(`label tile: ${r.status}`);
+      data = new Uint8Array(await r.arrayBuffer());
+    }
     const L = this.info.levels[level];
     const width = Math.min(TILE, L.width - col * TILE), height = Math.min(TILE, L.height - row * TILE);
     if (data.length !== width * height * this.bytes) throw new Error("label tile: unexpected size");
