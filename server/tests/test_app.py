@@ -33,7 +33,7 @@ def test_security(client):
 
 def test_info(client):
     i = client.get("/api/v1/info").json()
-    assert i["api_version"] == "1.1.0" and "edit" in i["capabilities"]
+    assert i["api_version"] == "1.2.0" and "edit" in i["capabilities"]
     assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"]}
 
 

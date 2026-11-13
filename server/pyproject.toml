@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 compass-studio-synth = "compass_studio.synth.cli:main"
+compass-studio-synth-labels = "compass_studio.synth.labelmap:main"
 compass-studio-serve = "compass_studio.serve:main"
 
 [dependency-groups]

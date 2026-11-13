@@ -23,6 +23,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
 from compass_studio.app import Dataset, create_app
+from compass_studio.imaging.labels import SyntheticLabels
 from compass_studio.imaging.pyramid import SyntheticPyramid
 from compass_studio.synth.generate import Params, generate
 
@@ -120,7 +121,10 @@ def api(tmp_path_factory):
                             region_vertices=(40, 80), region_radius_px=(80.0, 200.0), attrs=4),
              arrow=False, log=lambda m: None)
     ds = Dataset.open("conf", d / "c.ann.sqlite", d / "conf.curation.sqlite")
-    app = create_app({"img": SyntheticPyramid(2000, 1000)}, TOKEN, {HOST}, {f"http://{HOST}"},
+    labels = SyntheticLabels(2000, 1000)
+    labels.aligned_to = "img"
+    labels.classes = [{"value": 1, "name": "one", "color": "#112233"}, {"value": 2, "name": "two", "color": None}]
+    app = create_app({"img": SyntheticPyramid(2000, 1000), "lab": labels}, TOKEN, {HOST}, {f"http://{HOST}"},
                      datasets={"conf": ds})
     with TestClient(app, base_url=f"http://{HOST}") as c:
         c.headers["Authorization"] = f"Bearer {TOKEN}"
@@ -153,6 +157,13 @@ def test_scenario(api):
         r = a.get(f"/images/img/tiles/0/0/0.{fmt}")
         assert r.headers["content-type"] == {"jpg": "image/jpeg", "webp": "image/webp", "png": "image/png"}[fmt]
     a.get("/images/img/tiles/0/99/0.jpg")
+    a.get("/images/img/tiles/0/0/0.bin")  # 400: not a label map
+    lab = next(i for i in imgs if i.get("role") == "labels")
+    assert lab["aligned_to"] == "img" and lab["dtype"] == "uint8"
+    r = a.get(f"/images/{lab['id']}/tiles/0/0/0.bin", headers={"Accept-Encoding": "gzip"})
+    assert r.headers["content-encoding"] == "gzip" and len(r.content) == 512 * 512
+    a.get(f"/images/{lab['id']}/tiles/0/0/0.png")
+    a.get(f"/images/{lab['id']}/tiles/0/0/0.jpg")  # 400
     ver = imgs[0]["version"]
     r = a.get(f"/images/img/tiles/0/0/0.jpg?v={ver}")
     assert "immutable" in r.headers["cache-control"] and r.headers["etag"] == f'"{ver}"'

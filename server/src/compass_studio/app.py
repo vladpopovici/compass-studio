@@ -27,6 +27,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -44,12 +45,13 @@ from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, POINT_LAYER_VERSION, 
                           AnnotationStore, centroid_tile, encode_ipc, point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_MEDIA = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+_MEDIA = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "bin": "application/octet-stream"}
+_FORMATS = {"image": {"jpg", "webp", "png"}, "labels": {"bin", "png"}}
 
 
 class Guard:
@@ -161,7 +163,7 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
     @app.get("/api/v1/info")
     def info():
-        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "annotations", "events"]
+        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "events"]
         if any(d.sidecar for d in datasets.values()):
             caps.append("edit")
         return {"api_version": API_VERSION, "capabilities": caps,
@@ -188,12 +190,15 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
     async def image_tile(request: Request, image_id: str, level: int, col: int, row: int, fmt: str,
                          q: int = 90, v: str | None = None):
         p = _image(image_id)
-        if fmt not in _MEDIA or not 1 <= q <= 100:
-            raise HTTPException(400, "format")
-        etag = f'"{p.version}"'
+        if fmt not in _FORMATS[p.role] or not 1 <= q <= 100:
+            raise HTTPException(400, f"format: {p.role} tiles come as {', '.join(sorted(_FORMATS[p.role]))}")
+        if fmt == "png" and p.role == "labels" and p.dtype not in ("uint8", "uint16"):
+            raise HTTPException(400, "format: png only for 8 and 16-bit labels")
+        gz = fmt == "bin" and "gzip" in request.headers.get("accept-encoding", "")
+        etag = f'"{p.version}-gz"' if gz else f'"{p.version}"'
         # with ?v= matching the image version the URL names fixed content
         cache = "private, max-age=31536000, immutable" if v == p.version else "private, no-cache"
-        if p.version and etag in request.headers.get("if-none-match", ""):
+        if p.version and f'"{p.version}' in request.headers.get("if-none-match", ""):
             try:
                 p.tile_shape(level, col, row)
             except IndexError:
@@ -204,16 +209,20 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
             t0 = time.perf_counter()
             arr = p.read_tile(level, col, row)
             t1 = time.perf_counter()
-            body = _encode(arr, fmt, q)
+            body = _encode_labels(arr, fmt, p.dtype, gz) if p.role == "labels" else _encode(arr, fmt, q)
             return body, t1 - t0, time.perf_counter() - t1
 
         try:
             body, tr, te = await in_pool(work)
         except IndexError:
             raise HTTPException(404, "no such tile") from None
-        return Response(body, media_type=_MEDIA[fmt],
-                        headers={"Cache-Control": cache, "ETag": etag,
-                                 "Server-Timing": f"read;dur={tr * 1e3:.2f}, encode;dur={te * 1e3:.2f}"})
+        headers = {"Cache-Control": cache, "ETag": etag,
+                   "Server-Timing": f"read;dur={tr * 1e3:.2f}, encode;dur={te * 1e3:.2f}"}
+        if fmt == "bin":
+            headers["Vary"] = "Accept-Encoding"
+            if gz:
+                headers["Content-Encoding"] = "gzip"
+        return Response(body, media_type=_MEDIA[fmt], headers=headers)
 
     # -- stores and layers ------------------------------------------------
 
@@ -525,6 +534,21 @@ def _float(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _encode_labels(arr: np.ndarray, fmt: str, dtype: str, gz: bool) -> bytes:
+    """Label tile: raw little-endian values, row-major (gzip-compressed if
+    the client accepts it), or a grayscale PNG for 8 and 16-bit labels."""
+    if fmt == "png":
+        im = Image.fromarray(np.ascontiguousarray(arr.astype(np.uint16) if dtype == "uint16" else arr))
+        buf = io.BytesIO()
+        im.save(buf, "PNG", compress_level=1)
+        return buf.getvalue()
+    raw = np.ascontiguousarray(arr, dtype=np.dtype(dtype).newbyteorder("<")).tobytes()
+    if not gz:
+        return raw
+    c = zlib.compressobj(1, zlib.DEFLATED, 31)  # level 1; wbits 31 = gzip container
+    return c.compress(raw) + c.flush()
 
 
 def _encode(arr: np.ndarray, fmt: str, q: int) -> bytes:

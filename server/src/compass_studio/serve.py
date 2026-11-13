@@ -9,6 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import Dataset, create_app
+from .imaging.labels import SyntheticLabels, classes_file_for, load_classes, pair_labels
 from .imaging.pyramid import SyntheticPyramid, ZarrPyramid, find_images
 
 
@@ -29,6 +30,16 @@ def main(argv: list[str] | None = None) -> None:
                     help="serve every COMPASS .zarr folder directly in DIR, id = folder name (repeatable)")
     ap.add_argument("--synthetic", type=_kv, action="append", default=[], metavar="ID=WxH",
                     help="procedural test pyramid, e.g. synth200k=200000x200000")
+    ap.add_argument("--labels", type=_kv, action="append", default=[], metavar="ID=PATH",
+                    help="COMPASS label map (.zarr, one integer channel) to serve (repeatable); "
+                         "--images DIR picks these up by themselves")
+    ap.add_argument("--label-of", type=_kv, action="append", default=[], metavar="ID=IMAGE",
+                    help="the image a label map belongs to (default: the image whose id prefixes "
+                         "the map's, as in slide / slide.regions, or the only image)")
+    ap.add_argument("--classes", type=_kv, action="append", default=[], metavar="ID=FILE",
+                    help="class table (JSON) for a label map (default: <map>.classes.json next to it)")
+    ap.add_argument("--synthetic-labels", type=_kv, action="append", default=[], metavar="ID=IMAGE",
+                    help="procedural test label map the size of IMAGE")
     ap.add_argument("--annotations", type=_kv, action="append", default=[], metavar="ID=PATH",
                     help="COMPASS annotation store (.ann.sqlite) to serve (repeatable)")
     ap.add_argument("--sidecar-dir", type=Path,
@@ -71,10 +82,39 @@ def main(argv: list[str] | None = None) -> None:
             if k in paths:
                 ap.error(f"image id {k!r} given twice; use --image ID=PATH to rename one")
             paths[k] = str(v)
-    images = {k: ZarrPyramid(v, reader=a.reader) for k, v in paths.items()}
+    for k, v in a.labels:
+        if k in paths:
+            ap.error(f"id {k!r} given twice")
+        paths[k] = v
+    opened = {k: ZarrPyramid(v, reader=a.reader) for k, v in paths.items()}
+    for k, _ in a.labels:
+        if opened[k].role != "labels":
+            ap.error(f"--labels {k}: not a label map (needs one integer channel)")
+    images = {k: p for k, p in opened.items() if p.role == "image"}
+    labels = {k: p for k, p in opened.items() if p.role == "labels"}
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
+    for k, v in a.synthetic_labels:
+        if v not in images:
+            ap.error(f"--synthetic-labels {k}: no image {v!r}")
+        labels[k] = SyntheticLabels(images[v].width, images[v].height)
+    explicit_classes = dict(a.classes)
+    for k in explicit_classes:
+        if k not in labels:
+            ap.error(f"--classes {k}: no such label map")
+    for k, lab in labels.items():
+        f = explicit_classes.get(k) or (classes_file_for(paths[k]) if k in paths else None)
+        if f:
+            try:
+                lab.classes, lab.background = load_classes(f)
+            except (OSError, ValueError) as e:
+                ap.error(f"label map {k}: {e}")
+    try:
+        pair_labels(labels, images, dict(a.label_of) | {k: v for k, v in a.synthetic_labels})
+    except ValueError as e:
+        ap.error(str(e))
+    images |= labels
     datasets = {}
     for k, v in a.annotations:
         store = Path(v)
@@ -95,7 +135,9 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():
-        print(f"  image {k}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
+        what = (f"labels {k} ({p.dtype}, on {p.aligned_to}, "
+                f"{len(p.classes) if p.classes else 'no'} classes)" if p.role == "labels" else f"image {k}")
+        print(f"  {what}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
               f"fast path {sum(p.fast_levels)}/{len(p.levels)} levels", flush=True)
     for k, ds in datasets.items():
         print(f"  annotations {k}: {len(ds.store.layers)} layers"

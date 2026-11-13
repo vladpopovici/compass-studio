@@ -74,8 +74,14 @@ export interface paths {
                 level: components["parameters"]["Level"];
                 col: components["parameters"]["Col"];
                 row: components["parameters"]["Row"];
-                /** @description jpg for navigation; webp (lossless) or png for exact pixels. */
-                format: "jpg" | "webp" | "png";
+                /**
+                 * @description Images: jpg for navigation; webp (lossless) or png for exact pixels.
+                 *     Label maps (since 1.2.0): bin, the raw label values in the map's
+                 *     `dtype`, little-endian, row-major, tile width x height, gzip
+                 *     content-encoded when the request accepts it; png (grayscale) for
+                 *     uint8 and uint16 maps. Other combinations return 400.
+                 */
+                format: "jpg" | "webp" | "png" | "bin";
             };
             cookie?: never;
         };
@@ -469,6 +475,28 @@ export interface components {
              *     Pass it as the tiles' `v` parameter.
              */
             version?: string;
+            /**
+             * @description Since 1.2.0; absent means image. A label map has one integer
+             *     channel, pixel-aligned 1:1 with the image `aligned_to`.
+             * @enum {string}
+             */
+            role?: "image" | "labels";
+            /** @description Sample type (since 1.2.0); label maps use uint8, uint16, uint32 or int32. */
+            dtype?: string;
+            /** @description Label maps (since 1.2.0) - id of the image they belong to. */
+            aligned_to?: string | null;
+            /**
+             * @description Label maps (since 1.2.0) - names and colours of label values, from
+             *     a viewer-side class table; null when there is none.
+             */
+            classes?: components["schemas"]["LabelClass"][] | null;
+            /** @description Label maps (since 1.2.0) - the value drawn transparent. */
+            background?: number | null;
+        };
+        LabelClass: {
+            value: number;
+            name: string;
+            color: string | null;
         };
         Store: {
             id: string;
@@ -741,8 +769,14 @@ export interface operations {
                 level: components["parameters"]["Level"];
                 col: components["parameters"]["Col"];
                 row: components["parameters"]["Row"];
-                /** @description jpg for navigation; webp (lossless) or png for exact pixels. */
-                format: "jpg" | "webp" | "png";
+                /**
+                 * @description Images: jpg for navigation; webp (lossless) or png for exact pixels.
+                 *     Label maps (since 1.2.0): bin, the raw label values in the map's
+                 *     `dtype`, little-endian, row-major, tile width x height, gzip
+                 *     content-encoded when the request accepts it; png (grayscale) for
+                 *     uint8 and uint16 maps. Other combinations return 400.
+                 */
+                format: "jpg" | "webp" | "png" | "bin";
             };
             cookie?: never;
         };
@@ -757,6 +791,7 @@ export interface operations {
                     "image/jpeg": string;
                     "image/webp": string;
                     "image/png": string;
+                    "application/octet-stream": string;
                 };
             };
             /** @description Not modified (since 1.1.0) */

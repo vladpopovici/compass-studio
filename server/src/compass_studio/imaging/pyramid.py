@@ -37,13 +37,22 @@ class Pyramid:
     name: str | None = None
     objective_power: float | None = None
     version: str = ""  # opaque; changes whenever tile content may change
+    role: str = "image"  # or "labels": one integer channel, pixel-aligned with an image
+    dtype: str = "uint8"
+    aligned_to: str | None = None  # labels: the image id they belong to
+    classes: list[dict] | None = None  # labels: [{value, name, color}]
+    background: int | None = None  # labels: value drawn transparent
 
     def info(self) -> dict:
-        return {"width": self.width, "height": self.height, "tile_size": self.tile,
-                "levels": [{"width": l.width, "height": l.height, "downsample": 2 ** i}
-                           for i, l in enumerate(self.levels)],
-                "channels": self.channels, "mpp": self.mpp, "kind": self.kind,
-                "name": self.name, "objective_power": self.objective_power, "version": self.version}
+        out = {"width": self.width, "height": self.height, "tile_size": self.tile,
+               "levels": [{"width": l.width, "height": l.height, "downsample": 2 ** i}
+                          for i, l in enumerate(self.levels)],
+               "channels": self.channels, "mpp": self.mpp, "kind": self.kind,
+               "name": self.name, "objective_power": self.objective_power, "version": self.version,
+               "role": self.role, "dtype": self.dtype}
+        if self.role == "labels":
+            out |= {"aligned_to": self.aligned_to, "classes": self.classes, "background": self.background}
+        return out
 
     def tile_shape(self, level: int, col: int, row: int) -> tuple[int, int]:
         """(height, width) of a tile; IndexError outside the grid."""
@@ -59,8 +68,13 @@ class Pyramid:
         raise NotImplementedError
 
 
+LABEL_DTYPES = ("uint8", "uint16", "uint32", "int32")
+
+
 class ZarrPyramid(Pyramid):
-    """A COMPASS image: Zarr v3 group with arrays ``0``, ``1``, ... (y, x, c)."""
+    """A COMPASS image or map: Zarr v3 group with arrays ``0``, ``1``, ...,
+    either (y, x, c) or (y, x). One integer channel makes a label map
+    (``role == "labels"``); ``read_tile`` then returns (h, w)."""
 
     def __init__(self, path: str | Path, reader: str = "auto"):
         """``reader``: ``auto`` (direct shard reader where supported, else
@@ -75,14 +89,22 @@ class ZarrPyramid(Pyramid):
         self._fast: list[ShardedArray | None] = (
             [open_level(path / str(i)) for i in range(n)] if reader == "auto" else [None] * n)
         shapes = [a.shape for a in self._zarr]
-        if any(len(s) != 3 for s in shapes):
-            raise ValueError("expected (y, x, c) arrays")
+        ndim = len(shapes[0])
+        if ndim not in (2, 3) or any(len(s) != ndim for s in shapes):
+            raise ValueError("expected (y, x, c) or (y, x) arrays")
+        nch = shapes[0][2] if ndim == 3 else 1
+        dtype = np.dtype(self._zarr[0].dtype)
+        labels = nch == 1 and dtype.kind in "ui"
+        if labels and dtype.name not in LABEL_DTYPES:
+            raise ValueError(f"label maps must be one of {LABEL_DTYPES}, not {dtype.name}")
+        self._ndim = ndim
         chunk = self._zarr[0].chunks  # inner chunk shape for sharded arrays
         super().__init__(
             width=shapes[0][1], height=shapes[0][0],
             levels=[LevelInfo(width=s[1], height=s[0]) for s in shapes],
             tile=int(chunk[0]), channels=list(attrs.get("channel_names", [])),
-            mpp=attrs.get("base_mpp"), kind="zarr",
+            mpp=attrs.get("base_mpp"), kind="zarr", role="labels" if labels else "image",
+            dtype=dtype.name, background=0 if labels else None,
             fast_levels=[f is not None for f in self._fast],
             name=path.name.removesuffix(".zarr"),
             objective_power=_number(attrs.get("base_objective_power")),
@@ -91,16 +113,21 @@ class ZarrPyramid(Pyramid):
     def read_tile(self, level: int, col: int, row: int) -> np.ndarray:
         h, w = self.tile_shape(level, col, row)
         fast = self._fast[level]
-        if fast is not None and fast.layout.chunk_shape[2] == fast.layout.shape[2]:
+        out = None
+        if fast is not None and (self._ndim == 2 or fast.layout.chunk_shape[2] == fast.layout.shape[2]):
             # a tile is one inner chunk if, on each axis, chunk and tile edges
             # agree (equal size, or one chunk covers a level no wider than a tile)
             L = self.levels[level]
             cy, cx = fast.layout.chunk_shape[:2]
             if all(c == self.tile or (c >= n and n <= self.tile)
                    for c, n in ((cy, L.height), (cx, L.width))):
-                return fast.read_chunk((row, col, 0))
-        y0, x0 = row * self.tile, col * self.tile
-        return np.asarray(self._zarr[level][y0:y0 + h, x0:x0 + w])
+                out = fast.read_chunk((row, col) + ((0,) if self._ndim == 3 else ()))
+        if out is None:
+            y0, x0 = row * self.tile, col * self.tile
+            out = np.asarray(self._zarr[level][y0:y0 + h, x0:x0 + w])
+        if self.role == "labels" and out.ndim == 3:
+            out = out[..., 0]
+        return out
 
 
 class SyntheticPyramid(Pyramid):
