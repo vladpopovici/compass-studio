@@ -6,8 +6,9 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 
 ## Layout
 
-- `index.html`, `src/app/`: the application (milestone 3: image picker,
-  pan/zoom viewer, status bar with coordinates, level and scale bar).
+- `index.html`, `src/app/`: the application: image picker, pan/zoom
+  viewer, label maps panel (milestone 4), status bar with coordinates,
+  level, label under the cursor and scale bar.
 - `src/viewer/`: the framework-free viewer core (deck.gl `Deck`,
   OrthographicView, image tile layer). The application and the benches use it.
 - `src/components/ui/`: shadcn/ui components (copied, trimmed).
@@ -21,8 +22,15 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 
 Open the printed URL (it carries the session token in the `#token=`
 fragment). Keys: arrows pan (Shift: further), `+`/`-` zoom, `0` or `f`
-fit, `1` actual pixels, PageUp/PageDown previous/next image. The view is
+fit, `1` actual pixels, PageUp/PageDown previous/next image, `l` show or
+hide label maps, `o` outlines or fills. The view is
 kept in the URL (`?image=&x=&y=&z=`), so a reload returns to it.
+
+Label maps in the same folder pair with their slide by name
+(`slide.zarr`, `slide.tissue.zarr`, class table `slide.tissue.classes.json`).
+For a test map that follows the tissue of a slide:
+`uv run compass-studio-synth-labels <slide>.zarr <slide>.tissue.zarr`
+(keep it under `data/`).
 
 Development with hot reload: start the server with
 `--allow-origin http://127.0.0.1:5173`, then `pnpm dev`.

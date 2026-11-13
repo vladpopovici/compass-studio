@@ -4,8 +4,8 @@ import { scaleBar, shownLevel } from "./format";
 
 const fmt = (n: number, d = 0) => n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
 
-export function StatusBar({ image, view, cursor, tiles }: {
-  image: ImageInfo | null; view: View | null; cursor: [number, number] | null; tiles: string;
+export function StatusBar({ image, view, cursor, tiles, labels }: {
+  image: ImageInfo | null; view: View | null; cursor: [number, number] | null; tiles: string; labels: string;
 }) {
   const inside = image && cursor && cursor[0] >= 0 && cursor[1] >= 0 && cursor[0] < image.width && cursor[1] < image.height;
   const bar = image && view ? scaleBar(image.mpp, view.zoom) : null;
@@ -21,7 +21,8 @@ export function StatusBar({ image, view, cursor, tiles }: {
         <span title="Pyramid level shown">L{shownLevel(view.zoom, image.levels.length)}/{image.levels.length - 1}</span>
       )}
       {image?.mpp && <span title="Microns per level-0 px">{image.mpp.toPrecision(3)} µm/px</span>}
-      <span className="flex-1 truncate" title="Tile loading">{tiles}</span>
+      <span className="truncate text-foreground" title="Label under the cursor">{labels}</span>
+      <span className="flex-1 truncate text-right" title="Tile loading">{tiles}</span>
       {bar && (
         <span className="flex items-center gap-2" title="Scale">
           <span className="text-foreground">{bar.label}</span>

@@ -1,11 +1,13 @@
-// Milestone 3 application: image picker, pan/zoom viewer, status bar.
+// Application: image picker, pan/zoom viewer, label maps, status bar.
 // URL: /?image=<id>&x=&y=&z=#token=<token>  (position kept on reload; the
 // token stays in the fragment, which the browser never sends).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJSON, type ImageInfo } from "@/api";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { DEFAULT_STYLE, type LabelClass, type LabelStyle } from "@/viewer/labels";
 import type { View, Viewer } from "@/viewer/viewer";
+import { LabelPanel, type LabelMapState } from "./LabelPanel";
 import { StatusBar } from "./StatusBar";
 import { Toolbar } from "./Toolbar";
 import { ViewerPane } from "./ViewerPane";
@@ -35,6 +37,9 @@ export function App() {
   const [view, setView] = useState<View | null>(null);
   const [cursor, setCursor] = useState<[number, number] | null>(null);
   const [tiles, setTiles] = useState("");
+  const [styles, setStyles] = useState<Record<string, LabelStyle>>({});
+  const [values, setValues] = useState<Record<string, number[]>>({});
+  const [panel, setPanel] = useState(true);
   const restore = useRef(initialView());
 
   useEffect(() => {
@@ -42,7 +47,8 @@ export function App() {
       (images) => {
         setLoad({ state: "ready", images });
         const want = restore.current.image;
-        setImageId(images.find((i) => i.id === want)?.id ?? images[0]?.id ?? null);
+        const slides = images.filter((i) => i.role !== "labels");
+        setImageId(slides.find((i) => i.id === want)?.id ?? slides[0]?.id ?? null);
       },
       (e: Error) => setLoad({
         state: "error",
@@ -50,8 +56,13 @@ export function App() {
       }));
   }, []);
 
-  const images = load.state === "ready" ? load.images : [];
+  const all = useMemo(() => (load.state === "ready" ? load.images : []), [load]);
+  const images = useMemo(() => all.filter((i) => i.role !== "labels"), [all]);
   const image = images.find((i) => i.id === imageId) ?? null;
+  const labelInfos = useMemo(() => all.filter((i) => i.role === "labels" && i.aligned_to === imageId), [all, imageId]);
+  const maps: LabelMapState[] = labelInfos.map((info) => ({
+    info, style: styles[info.id] ?? DEFAULT_STYLE, values: values[info.id] ?? [],
+  }));
 
   useEffect(() => {
     if (!viewer) return;
@@ -59,6 +70,30 @@ export function App() {
     const keep = image && r.image === image.id;
     viewer.setImage(image, keep ? { x: r.x, y: r.y, zoom: r.zoom } : undefined);
   }, [viewer, image]);
+
+  useEffect(() => {
+    if (!viewer) return;
+    viewer.setLabels(labelInfos.map((info) => ({ info, style: styles[info.id] ?? DEFAULT_STYLE })));
+    // maps without a class table: list the values found on the coarsest level
+    for (const info of labelInfos) {
+      if (info.classes?.length || values[info.id]) continue;
+      viewer.labelSource(info.id)?.discover().then(
+        (v) => setValues((old) => ({ ...old, [info.id]: v })),
+        () => setValues((old) => ({ ...old, [info.id]: [] })));
+    }
+  }, [viewer, labelInfos, styles, values]);
+
+  const setStyle = useCallback((id: string, s: LabelStyle) => setStyles((old) => ({ ...old, [id]: s })), []);
+
+  const hoverLabels = useMemo(() => {
+    if (!viewer || !cursor) return "";
+    return viewer.labelsAt(cursor[0], cursor[1]).map(({ info, value }) => {
+      if (value === info.background) return "";
+      const c = ((info.classes ?? []) as LabelClass[]).find((x) => x.value === value);
+      return `${info.name ?? info.id}: ${value}${c ? ` ${c.name}` : ""}`;
+    }).filter(Boolean).join("  ");
+    // styles: visibility changes what is under the cursor
+  }, [viewer, cursor, styles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // URL follows the view, at most every 300 ms
   useEffect(() => {
@@ -92,6 +127,14 @@ export function App() {
         "+": () => viewer.zoomBy(1), "=": () => viewer.zoomBy(1), "-": () => viewer.zoomBy(-1),
         "0": () => viewer.fit(), f: () => viewer.fit(), "1": () => viewer.zoomTo(0),
         PageDown: () => cycle(1), PageUp: () => cycle(-1),
+        l: () => setStyles((old) => {
+          const anyVisible = labelInfos.some((i) => (old[i.id] ?? DEFAULT_STYLE).visible);
+          return Object.fromEntries(labelInfos.map((i) => [i.id, { ...(old[i.id] ?? DEFAULT_STYLE), visible: !anyVisible }]));
+        }),
+        o: () => setStyles((old) => {
+          const anyOutline = labelInfos.some((i) => (old[i.id] ?? DEFAULT_STYLE).outline);
+          return Object.fromEntries(labelInfos.map((i) => [i.id, { ...(old[i.id] ?? DEFAULT_STYLE), outline: !anyOutline }]));
+        }),
       };
       const cycle = (d: number) => {
         if (!images.length) return;
@@ -106,22 +149,26 @@ export function App() {
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [viewer, images, imageId, pick]);
+  }, [viewer, images, imageId, pick, labelInfos]);
 
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col">
         <Toolbar images={images} image={image} view={view} onImage={pick}
-                 onZoomBy={(d) => viewer?.zoomBy(d)} onFit={() => viewer?.fit()} onOneToOne={() => viewer?.zoomTo(0)} />
-        <main className="relative min-h-0 flex-1">
-          <ViewerPane onReady={setViewer} onView={setView} onHover={setCursor} />
-          {load.state !== "ready" || !image ? (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
-              {load.state === "loading" ? "Loading…" : load.state === "error" ? load.message : "No images served."}
-            </div>
-          ) : null}
-        </main>
-        <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} />
+                 onZoomBy={(d) => viewer?.zoomBy(d)} onFit={() => viewer?.fit()} onOneToOne={() => viewer?.zoomTo(0)}
+                 labelCount={maps.length} panel={panel} onPanel={() => setPanel((p) => !p)} />
+        <div className="flex min-h-0 flex-1">
+          <main className="relative min-w-0 flex-1">
+            <ViewerPane onReady={setViewer} onView={setView} onHover={setCursor} />
+            {load.state !== "ready" || !image ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
+                {load.state === "loading" ? "Loading…" : load.state === "error" ? load.message : "No images served."}
+              </div>
+            ) : null}
+          </main>
+          {panel && maps.length > 0 && <LabelPanel maps={maps} onChange={setStyle} />}
+        </div>
+        <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} labels={hoverLabels} />
       </div>
     </TooltipProvider>
   );

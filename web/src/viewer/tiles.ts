@@ -112,7 +112,7 @@ class FrameGate {
 }
 
 /** Tileset that also selects a ring of neighbouring tiles at the same level. */
-function ringTileset(ring: number, cols: (z: number) => number, rows: (z: number) => number) {
+export function ringTileset(ring: number, cols: (z: number) => number, rows: (z: number) => number) {
   return class RingTileset extends Tileset2D {
     getTileIndices(opts: Parameters<Tileset2D["getTileIndices"]>[0]) {
       const base = super.getTileIndices(opts);

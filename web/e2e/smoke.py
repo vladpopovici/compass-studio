@@ -5,7 +5,8 @@
 Needs a running server with ``--web ../web/dist`` and at least two images.
 Checks: tiles load, keyboard zoom/fit/1:1, mouse drag and wheel, cursor
 coordinates, the view kept in the URL across a reload, image switching, the
-error shown without a token, and no console errors.
+error shown without a token, and no console errors. If the first image has
+label maps: the panel, label values under the cursor, `l` and class toggles.
 """
 
 import argparse
@@ -39,6 +40,57 @@ async def settle(ff, before: dict | None = None, timeout: float = 10) -> dict:
     raise TimeoutError(f"view did not change from {before}")
 
 
+HOVER = "document.querySelector('footer [title=\"Label under the cursor\"]').textContent"
+
+
+async def hover_label(ff) -> tuple[int, int, str] | None:
+    """Move over a grid of canvas points until a label value shows."""
+    for y in range(150, 600, 50):
+        for x in range(300, 1000, 50):
+            await ff.mouse([{"type": "pointerMove", "x": x, "y": y}])
+            await asyncio.sleep(0.05)
+            t = await ff.eval(HOVER)
+            if t:
+                return x, y, t
+    return None
+
+
+async def check_labels(ff, check, shots):
+    check(True, "label maps panel shown")
+    await ff.wait_for(TILES_IDLE)
+    await asyncio.sleep(0.5)
+    if shots:
+        await ff.screenshot(shots / "4-labels.png")
+    hit = await hover_label(ff)
+    check(hit is not None, f"label value under the cursor: {hit}")
+    if not hit:
+        return
+    x, y, _ = hit
+    await ff.key("l")
+    await asyncio.sleep(0.3)
+    await ff.mouse([{"type": "pointerMove", "x": x + 1, "y": y}])
+    await asyncio.sleep(0.2)
+    check(await ff.eval(HOVER) == "", "'l' hides the label maps")
+    await ff.key("l")
+    await ff.key("o")
+    await asyncio.sleep(0.5)
+    if shots:
+        await ff.wait_for(TILES_IDLE)
+        await ff.screenshot(shots / "5-outlines.png")
+    await ff.key("o")
+    n = await ff.eval("document.querySelectorAll('aside input[type=checkbox]').length")
+    await ff.eval("document.querySelector('aside button:nth-of-type(1)') && 1")
+    none = await ff.eval("(() => { const b = [...document.querySelectorAll('aside button')].find(b => b.textContent === 'None');"
+                         " b.click(); return 1; })()")
+    await asyncio.sleep(0.3)
+    checked = await ff.eval("[...document.querySelectorAll('aside input[type=checkbox]')].filter(c => c.checked).length")
+    check(none and n > 0 and checked == 0, f"'None' unchecks all {n} classes")
+    await ff.eval("[...document.querySelectorAll('aside button')].find(b => b.textContent === 'All').click(), 1")
+    await asyncio.sleep(0.3)
+    checked = await ff.eval("[...document.querySelectorAll('aside input[type=checkbox]')].filter(c => c.checked).length")
+    check(checked == n, "'All' checks them again")
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("base")
@@ -60,6 +112,11 @@ async def main() -> int:
         if a.shots:
             a.shots.mkdir(parents=True, exist_ok=True)
             await ff.screenshot(a.shots / "1-fit.png")
+
+        labels = await ff.eval("document.querySelector('aside h2')?.textContent ?? null")
+        if labels:
+            await check_labels(ff, check, a.shots)
+            v0 = await url_view(ff)
 
         await ff.key("1")
         v = await settle(ff, v0)

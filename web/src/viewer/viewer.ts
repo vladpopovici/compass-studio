@@ -4,6 +4,8 @@
 
 import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
 import type { ImageInfo } from "../api";
+import type { Layer } from "@deck.gl/core";
+import { LabelSource, type LabelStyle } from "./labels";
 import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats, type TileOptions } from "./tiles";
 
 export interface View {
@@ -34,6 +36,8 @@ export class Viewer {
   private vs: OrthographicViewState = { target: [0, 0, 0], zoom: 0 };
   private size: [number, number] = [1, 1];
   private resize: ResizeObserver;
+  private imageLayer: Layer | null = null;
+  private labels = new Map<string, { source: LabelSource; style: LabelStyle }>();
 
   constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
     this.deck = new Deck({
@@ -65,16 +69,54 @@ export class Viewer {
   /** Show an image; `view` restores a position (else fit). */
   setImage(info: ImageInfo | null, view?: Partial<Pick<View, "x" | "y" | "zoom">>) {
     this.info = info;
-    if (!info) {
-      this.deck.setProps({ layers: [] });
-      return;
-    }
-    this.deck.setProps({ layers: [makeTileLayer(info, this.stats, "", this.opts.tiles ?? TILE_PRESETS.tuned)] });
+    this.imageLayer = info ? makeTileLayer(info, this.stats, "", this.opts.tiles ?? TILE_PRESETS.tuned) : null;
+    this.render();
+    if (!info) return;
     const fit = this.fitZoom();
     this.setViewState({
       target: [view?.x ?? info.width / 2, view?.y ?? info.height / 2, 0],
       zoom: view?.zoom ?? fit,
     });
+  }
+
+  /** Label maps drawn over the image, bottom first; sources are kept while listed. */
+  setLabels(entries: { info: ImageInfo; style: LabelStyle }[]) {
+    const keep = new Set(entries.map((e) => e.info.id));
+    for (const [id, l] of this.labels)
+      if (!keep.has(id) || l.source.info.version !== entries.find((e) => e.info.id === id)!.info.version) {
+        l.source.destroy();
+        this.labels.delete(id);
+      }
+    const next = new Map<string, { source: LabelSource; style: LabelStyle }>();
+    for (const { info, style } of entries) {
+      const source = this.labels.get(info.id)?.source ?? new LabelSource(info, this.opts.tiles ?? TILE_PRESETS.tuned);
+      source.setStyle(style);
+      next.set(info.id, { source, style });
+    }
+    this.labels = next;
+    this.render();
+  }
+
+  /** Label values under a level-0 point, for visible maps (top first). */
+  labelsAt(x: number, y: number): { info: ImageInfo; value: number }[] {
+    const level = Math.max(0, Math.floor(-(this.vs.zoom as number) + 1e-9));
+    const out: { info: ImageInfo; value: number }[] = [];
+    for (const { source, style } of [...this.labels.values()].reverse()) {
+      if (!style.visible) continue;
+      const v = source.valueAt(x, y, level);
+      if (v !== null) out.push({ info: source.info, value: v });
+    }
+    return out;
+  }
+
+  labelSource(id: string): LabelSource | undefined {
+    return this.labels.get(id)?.source;
+  }
+
+  private render() {
+    const layers: Layer[] = this.imageLayer ? [this.imageLayer] : [];
+    for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
+    this.deck.setProps({ layers });
   }
 
   view(): View {
@@ -114,6 +156,7 @@ export class Viewer {
   }
 
   destroy() {
+    for (const l of this.labels.values()) l.source.destroy();
     this.resize.disconnect();
     this.deck.finalize();
   }

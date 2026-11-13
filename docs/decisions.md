@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestone 3 done (2026-11-13); next is milestone 4. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 and 4 done (2026-11-13); next is milestone 5. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -187,6 +187,24 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   server memory per revision (5M points: 5.4 s first, 26 ms cached).
 - Label maps: the same tile path as images, as integer textures coloured by a
   palette texture, so class toggling needs no refetch.
+  Milestone 4 (2026-11-13): COMPASS maps are 2-D (or one-channel) integer
+  Zarr pyramids written by `write_pyramid`, pixel-aligned 1:1 with a slide,
+  levels by nearest-neighbour subsampling. Contract 1.2.0 lists them in
+  `/images` with `role: labels`, `dtype` (uint8, uint16, uint32, int32),
+  `aligned_to`, `classes` and `background`; tiles `.bin` are the raw
+  little-endian values, gzip content-encoded (level 1). Pairing: explicit
+  `--label-of`, else the image whose id is a dotted prefix of the map's
+  (`slide` / `slide.tissue`), else the only image; sizes must match.
+  Class tables are viewer-side JSON files (`<map>.classes.json` next to the
+  map, or `--classes`): `{"background": 0, "classes": [{"value", "name",
+  "color"}]}`; COMPASS defines no attribute for them yet. The client packs
+  values into r8/rg8/rgba8 textures, decodes them in the shader and colours
+  them from a 256 x 256 palette texture (values from 65536 up get a hashed
+  colour); outline mode draws class boundaries. Measured on the sample
+  slide with a synthetic tissue map (workstation, 4 server CPUs): server
+  read about 0.1 ms and gzip under 1 ms per tile, 6 to 14 kB per tile;
+  a class toggle reaches the screen in two frames (32 to 34 ms, headless
+  Firefox, 25 tiles on screen), within the 50 ms budget.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
   S3 (2026-11-13): points use DataFilterExtension categories (group ids
   rebased to 0..k-1; at most 128 groups per layer). Polygons use one layer
@@ -302,7 +320,7 @@ baseline (D5).
 1. Repository, contract skeleton, sample data and synthetic annotation generator.
 2. Spikes S1 to S6; freeze contract v1. Done 2026-11-13.
 3. RGB tile server and pan/zoom viewer. Done 2026-11-13 (laptop check by the owner pending).
-4. Label maps with class toggles.
+4. Label maps with class toggles. Done 2026-11-13.
 5. Points: layer view, picking, attribute panel.
 6. Polygons with level of detail.
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
