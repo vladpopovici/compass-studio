@@ -5,10 +5,12 @@
 //   bench=pan  scripted zoom/pan flight, cold then warm; posts frame and tile timings
 //   bench=jitter  sub-pixel edge placement at large coordinates and deep zoom
 //   bench=annot   S3: 5M points and 1M polygons resident (see annot.ts)
+//   bench=edit    S5: check-out, vertex editing, commit (see edit.ts)
 
 import { Deck, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
 import { getJSON, type ImageInfo } from "./api";
 import { runAnnot } from "./annot";
+import { runEdit } from "./edit";
 import { runJitter } from "./jitter";
 import { runPan } from "./pan";
 import { fitZoom, makeTileLayer, TileStats } from "./tiles";
@@ -60,6 +62,10 @@ async function main() {
   }
   if (bench === "annot") {
     await runAnnot(hud);
+    return;
+  }
+  if (bench === "edit") {
+    await runEdit(hud);
     return;
   }
   const images = await getJSON<ImageInfo[]>("images");

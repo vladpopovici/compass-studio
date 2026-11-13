@@ -37,16 +37,16 @@ const LAYERS = (params.get("layers") ?? "points,cells,regions").split(",");
 const TESS = params.get("tess") ?? "server";
 const POLYMODE = params.get("polymode") ?? "groups";
 
-const PALETTE: [number, number, number][] = [
+export const PALETTE: [number, number, number][] = [
   [230, 25, 75], [60, 180, 75], [255, 225, 25], [0, 130, 200], [245, 130, 48],
   [145, 30, 180], [70, 240, 240], [240, 50, 230], [210, 245, 60], [250, 190, 212],
 ];
 
-interface Meta { params: { width: number; height: number };
+export interface Meta { params: { width: number; height: number };
   layers: { layer_id: number; name: string; groups: Record<string, string> }[] }
 
 /** One deck layer. A logical layer (`parent`) is one or more of these. */
-interface Part {
+export interface Part {
   id: string; parent: string; kind: "points" | "polygons";
   groupKey: number | null;          // polymode=groups: the group this part holds
   groups: number[];                 // filtered parts: rebased group keys 0..k-1
@@ -59,7 +59,7 @@ interface Part {
   categories?: Uint32Array;         // group key per point / per vertex (filtered parts)
 }
 
-async function fetchTable(name: string): Promise<{ table: Table; bytes: number; ms: number }> {
+export async function fetchTable(name: string): Promise<{ table: Table; bytes: number; ms: number }> {
   const t0 = performance.now();
   const r = await fetch(`api/v1/spike/files/${name}`, { headers: authHeaders });
   if (!r.ok) throw new Error(`${name}: ${r.status}`);
@@ -137,7 +137,7 @@ function polygonPart(p: PolyRows, rows: Int32Array, withIndices: boolean): Omit<
   return { kind: "polygons", count: n, vertices: nv, objectIds, positions, startIndices, indices };
 }
 
-function buildPolygons(t: Table, meta: Meta, layerId: number, withIndices: boolean): Part[] {
+export function buildPolygons(t: Table, meta: Meta, layerId: number, withIndices: boolean): Part[] {
   const p = polyRows(t, meta, layerId);
   if (POLYMODE === "groups") {
     const byKey: number[][] = Array.from({ length: p.k }, () => []);

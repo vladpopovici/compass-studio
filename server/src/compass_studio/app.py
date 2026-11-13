@@ -22,10 +22,12 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
+from .annot.sidecar import Conflict, Sidecar
 from .imaging.pyramid import Pyramid
 
 API_VERSION = "0.0.0"
@@ -71,7 +73,7 @@ def default_tile_threads() -> int:
 def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
                allowed_origins: set[str], results_dir: Path | None = None,
                web_dir: Path | None = None, spike_files: Path | None = None,
-               tile_threads: int | None = None) -> FastAPI:
+               tile_threads: int | None = None, sidecar: Sidecar | None = None) -> FastAPI:
     app = FastAPI(title="CompassStudio", version=API_VERSION, docs_url=None,
                   redoc_url=None, openapi_url=None)
     app.add_middleware(Guard, token=token, allowed_hosts=allowed_hosts,
@@ -124,6 +126,41 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         return Response(body, media_type=_MEDIA[fmt],
                         headers={"Cache-Control": "private, max-age=3600",
                                  "Server-Timing": f"read;dur={tr * 1e3:.2f}, encode;dur={te * 1e3:.2f}"})
+
+    if sidecar is not None:
+        # Draft edit API (D8, spike S5). One sidecar per server; writes are
+        # serialised by SQLite (BEGIN IMMEDIATE) and checked against
+        # base_revision.
+        edit_pool = ThreadPoolExecutor(1, thread_name_prefix="edit")
+
+        async def in_edit_thread(fn):
+            return await asyncio.get_running_loop().run_in_executor(edit_pool, fn)
+
+        @app.get("/api/v1/edit/revision")
+        async def edit_revision():
+            return {"revision": await in_edit_thread(sidecar.revision)}
+
+        @app.get("/api/v1/edit/objects")
+        async def edit_objects(ids: str):
+            try:
+                oids = [int(x) for x in ids.split(",") if x]
+            except ValueError:
+                raise HTTPException(400, "ids") from None
+            if not 0 < len(oids) <= 1000:
+                raise HTTPException(400, "1 to 1000 ids")
+            return await in_edit_thread(lambda: sidecar.features(oids))
+
+        @app.post("/api/v1/edit/commit")
+        async def edit_commit(request: Request):
+            body = await request.json()
+            try:
+                c = await in_edit_thread(lambda: sidecar.apply(int(body["base_revision"]), body["ops"],
+                                                               client=body.get("client")))
+            except Conflict as e:
+                return JSONResponse({"detail": "conflict", "current_revision": e.current}, status_code=409)
+            except (KeyError, ValueError, TypeError) as e:
+                raise HTTPException(400, str(e)) from None
+            return {"revision": c.revision, "created": c.object_ids}
 
     if results_dir is not None:
         @app.post("/api/v1/spike/results/{name}")

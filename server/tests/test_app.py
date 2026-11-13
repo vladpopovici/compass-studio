@@ -63,3 +63,22 @@ def test_results(client, tmp_path):
     assert client.post("/api/v1/spike/results/s2-pan", json={"a": 1}).status_code == 200
     assert client.post("/api/v1/spike/results/..%2Fx", json={}).status_code in (400, 404)
     assert len(list(tmp_path.glob("*-s2-pan.json"))) == 1
+
+
+def test_edit_api(tmp_path):
+    from compass_studio.annot.sidecar import Sidecar
+    sc = Sidecar(tmp_path / "c.sqlite")
+    _, (g,) = sc.create_layer("mine", ["a"])
+    app = create_app({}, TOKEN, {HOST}, {f"http://{HOST}"}, sidecar=sc)
+    c = TestClient(app, base_url=f"http://{HOST}")
+    c.headers["Authorization"] = f"Bearer {TOKEN}"
+    sq = [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+    r = c.post("/api/v1/edit/commit", json={"base_revision": 0, "ops": [
+        {"op": "create", "group_id": g, "coords": sq}]})
+    assert r.status_code == 200 and r.json()["revision"] == 1
+    oid = r.json()["created"][0]
+    fc = c.get(f"/api/v1/edit/objects?ids={oid}").json()
+    assert fc["revision"] == 1 and fc["features"][0]["geometry"]["type"] == "Polygon"
+    stale = c.post("/api/v1/edit/commit", json={"base_revision": 0, "ops": [{"op": "delete", "object_id": oid}]})
+    assert stale.status_code == 409 and stale.json()["current_revision"] == 1
+    assert c.post("/api/v1/edit/commit", json={"base_revision": 1, "ops": [{"op": "nope"}]}).status_code == 400

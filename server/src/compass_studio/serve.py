@@ -8,6 +8,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import create_app
+from .annot.sidecar import Sidecar
 from .imaging.pyramid import SyntheticPyramid, ZarrPyramid
 
 
@@ -34,6 +35,7 @@ def main(argv: list[str] | None = None) -> None:
                     help="image reader: direct shard reader where supported (auto) or zarr-python")
     ap.add_argument("--tile-threads", type=int, default=None,
                     help="tile read/encode threads (default: available CPUs; 0 = Starlette's pool)")
+    ap.add_argument("--sidecar", type=Path, help="sidecar curation database to edit (draft edit API)")
     ap.add_argument("--web", type=Path, help="built client directory to serve at /")
     ap.add_argument("--spike-files", type=Path,
                     help="serve this directory at /api/v1/spike/files (spike inputs)")
@@ -50,14 +52,14 @@ def main(argv: list[str] | None = None) -> None:
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
-    if not images and a.spike_files is None:
+    if not images and a.spike_files is None and a.sidecar is None:
         ap.error("nothing to serve: give --image, --synthetic or --spike-files")
 
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}
     origins = {f"http://{h}" for h in hosts} | set(a.allow_origin)
     app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files,
-                     a.tile_threads)
+                     a.tile_threads, Sidecar(a.sidecar) if a.sidecar else None)
 
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():

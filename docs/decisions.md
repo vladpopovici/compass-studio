@@ -183,11 +183,27 @@ frozen schema document is needed from the COMPASS side (section 8).
 - **Operations**: create, update geometry, update attributes, delete, move
   between groups. Operations are batched and atomic, append to a linear log, and
   advance a revision counter. Undo and redo are inverse operations replayed
-  through the same API.
+  through the same API. S6 (2026-11-13): batches of up to 100 operations
+  commit in under 35 ms p95 on a sidecar holding a forked 1M-polygon layer
+  (WAL, synchronous NORMAL; FULL adds about 3 ms); 1,000-operation batches
+  take 50 to 230 ms. Forking a 1M-object layer takes 8.4 s and 548 MB; a
+  copy-on-write overlay is the fallback if that proves too slow. Another
+  process's commits are detected via `PRAGMA data_version` polling within
+  about 10 ms, readers are not blocked, and racing writers get conflicts,
+  not busy errors. Provisional id scheme: forked objects keep their source
+  ids, new objects get ids above every id used. Details: `docs/spikes/S6.md`.
 - **Editing library**: `@deck.gl-community/editable-layers` (successor of
   nebula.gl). Its repository is flagged semi-maintained and it does not support
-  deck.gl's WebGPU path, which is acceptable under D5. **[verify]** it works on
-  an orthographic, basemap-free canvas (S5).
+  deck.gl's WebGPU path, which is acceptable under D5. Verified by S5
+  (2026-11-13, version 9.4.8): with `coordinateSystem: CARTESIAN` it works on
+  the orthographic, basemap-free canvas (ModifyMode, DrawPolygonMode).
+  Check-out and commit round trips: 18 to 22 ms for cells, 40 to 66 ms for
+  5,000-vertex regions, with 1M polygons resident. Checked-out objects are
+  hidden by a value filter whose GPU buffer is rewritten only for the
+  object's vertices. Dragging a vertex of a 5,000-vertex polygon runs at
+  about 30 fps (editable-layers' per-move JavaScript); large polygons need
+  zoomed-in or local editing, and client-side validity checks (the server
+  refuses self-intersections). Details: `docs/spikes/S5.md`.
 - Out of v1: merge-back of curated layers into a COMPASS store; raster label
   painting (the image store is write-once by design, and a sharded
   chunk update rewrites the whole shard; it would need a sparse delta overlay).
@@ -250,6 +266,8 @@ baseline (D5).
 
 - License.
 - Object id scheme for the sidecar database (namespacing against source ids).
+  Provisional (S6): forked objects keep source ids; breaks if two stores with
+  overlapping ids are forked into one sidecar.
 - Frozen COMPASS annotation-schema document (ideally in the COMPASS repository).
 - Merge-back path from sidecar layers to a COMPASS store.
 - dockview maintenance status; browser Blosc-bitshuffle decode (only relevant if
