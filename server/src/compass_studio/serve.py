@@ -30,6 +30,10 @@ def main(argv: list[str] | None = None) -> None:
                     help="required to bind anything but 127.0.0.1 (D10)")
     ap.add_argument("--allow-origin", action="append", default=[],
                     help="extra allowed Origin, e.g. a dev server")
+    ap.add_argument("--reader", choices=["auto", "zarr"], default="auto",
+                    help="image reader: direct shard reader where supported (auto) or zarr-python")
+    ap.add_argument("--tile-threads", type=int, default=None,
+                    help="tile read/encode threads (default: available CPUs; 0 = Starlette's pool)")
     ap.add_argument("--web", type=Path, help="built client directory to serve at /")
     ap.add_argument("--spike-files", type=Path,
                     help="serve this directory at /api/v1/spike/files (spike inputs)")
@@ -42,7 +46,7 @@ def main(argv: list[str] | None = None) -> None:
     if a.web is not None and not (a.web / "index.html").is_file():
         ap.error(f"--web {a.web}: no index.html; build the client first "
                  "(cd web && pnpm install && pnpm build)")
-    images = {k: ZarrPyramid(v) for k, v in a.image}
+    images = {k: ZarrPyramid(v, reader=a.reader) for k, v in a.image}
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
@@ -52,7 +56,8 @@ def main(argv: list[str] | None = None) -> None:
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}
     origins = {f"http://{h}" for h in hosts} | set(a.allow_origin)
-    app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files)
+    app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files,
+                     a.tile_threads)
 
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():

@@ -57,18 +57,22 @@ class Pyramid:
 class ZarrPyramid(Pyramid):
     """A COMPASS image: Zarr v3 group with arrays ``0``, ``1``, ... (y, x, c)."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, reader: str = "auto"):
+        """``reader``: ``auto`` (direct shard reader where supported, else
+        zarr-python) or ``zarr`` (zarr-python only; for comparison, S1)."""
+        if reader not in ("auto", "zarr"):
+            raise ValueError(reader)
         path = Path(path)
         attrs = json.loads((path / "zarr.json").read_text()).get("attributes", {})
         group = zarr.open_group(str(path), mode="r")
         n = int(attrs.get("level_count", len(list(group.array_keys()))))
         self._zarr = [group[str(i)] for i in range(n)]
-        self._fast: list[ShardedArray | None] = [open_level(path / str(i)) for i in range(n)]
+        self._fast: list[ShardedArray | None] = (
+            [open_level(path / str(i)) for i in range(n)] if reader == "auto" else [None] * n)
         shapes = [a.shape for a in self._zarr]
         if any(len(s) != 3 for s in shapes):
             raise ValueError("expected (y, x, c) arrays")
-        chunk = (self._fast[0].layout.chunk_shape if self._fast[0]
-                 else self._zarr[0].chunks)
+        chunk = self._zarr[0].chunks  # inner chunk shape for sharded arrays
         super().__init__(
             width=shapes[0][1], height=shapes[0][0],
             levels=[LevelInfo(width=s[1], height=s[0]) for s in shapes],

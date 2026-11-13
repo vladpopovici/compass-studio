@@ -1,7 +1,13 @@
 # S1: tile throughput
 
-zarr-python vs the direct shard reader (`server/src/compass_studio/imaging/shards.py`),
-1 to 64 concurrent requests, per level and for empty vs tissue chunks; JPEG
-(Pillow vs libjpeg-turbo) and lossless (PNG vs WebP) encode cost. Pass: no
-throughput collapse under concurrency; server p95 per 512 px tile fits the
-100 ms budget.
+Readers (direct shard reader vs zarr-python), encoders, and HTTP load at 1 to
+64 concurrent requests on the real slide.
+
+    cd server
+    uv run python ../spikes/S1/bench.py tiles <image.zarr>
+    taskset -c 0-3 uv run python ../spikes/S1/bench.py inproc <image.zarr>
+    python3 -I ../spikes/S1/run_http.py <image.zarr> fast --reader auto
+    python3 -I ../spikes/S1/run_http.py <image.zarr> zarr --reader zarr
+
+`run_http.py` pins the server to CPUs 0-3 and the load generator (4 client
+processes) to CPUs 4-7. Results: `docs/spikes/S1.md`.

@@ -96,17 +96,25 @@ so one 512 px tile is one inner chunk.
 
 Resolved 2026-11-12: production images are folders, not zips, so the `zipfile`
 lock contention concern (CPython issue 42369) and the pread-based zip store no
-longer apply. **[verify]** whether zarr-python's per-chunk overhead limits
-throughput under concurrency; candidate fast path: a direct shard reader that
-caches each shard index and reads one inner chunk with `os.pread`, falling back
-to zarr-python for layouts or codecs it does not handle. Decided by spike S1.
+longer apply. Decided by S1 (2026-11-13): a direct shard reader caches each
+shard index and reads one inner chunk with `os.pread`, falling back to
+zarr-python for layouts or codecs it does not handle. In process it is about
+3x faster than zarr-python at 4 or more threads (zarr-python stops scaling at
+2); end to end over HTTP it gives about 50 % more throughput (1,100 against
+720 tiles/s on 4 CPUs), with no collapse up to 64 concurrent requests.
+Details: `docs/spikes/S1.md`.
 Group attributes carry import provenance, including source storage paths, so
 test fixtures must never copy them.
 
 ### D4. Tile pipeline
 - RGB: server decodes Zarr chunks and encodes JPEG (quality configurable,
-  default about 90) for navigation; lossless on demand (PNG or lossless WebP,
-  chosen in S1). Disk cache for transcoded tiles.
+  default about 90) for navigation; lossless on demand as WebP lossless,
+  method 0 (S1: 5.8 ms and 424 kB per 512 px tile, against 13.7 ms and
+  457 kB for PNG level 1). Disk cache for transcoded tiles: S1 measured JPEG
+  q90 encoding at about 0.5 ms and a tile read at about 1.5 ms, so the cache
+  is deferred until slow storage (network mounts) makes it worthwhile.
+- Tile work runs on a dedicated thread pool, one thread per CPU (S1: about
+  15 % more throughput than Starlette's default pool).
 - Multichannel: raw per-channel tiles with shader-side channel mixing and LUTs.
 - Rejected as default: client-side Zarr decoding (needs browser Blosc-bitshuffle
   support **[verify]** and reimplementation of the shard layer).

@@ -41,6 +41,11 @@ def test_levels_and_edge_tiles(client):
     assert client.get("/api/v1/images/s/tiles/0/6/0.jpg").status_code == 404
     assert client.get("/api/v1/images/s/tiles/9/0/0.jpg").status_code == 404
     assert "read;dur=" in client.get("/api/v1/images/s/tiles/3/0/0.jpg").headers["server-timing"]
+    r = client.get("/api/v1/images/s/tiles/0/0/0.webp")
+    assert r.headers["content-type"] == "image/webp"
+    im = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"))
+    from compass_studio.imaging.pyramid import SyntheticPyramid as SP
+    np.testing.assert_array_equal(im, SP(3000, 1200).read_tile(0, 0, 0))  # lossless
 
 
 def test_spike_files_need_token(tmp_path):
