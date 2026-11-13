@@ -135,6 +135,13 @@ milestone 3). Details: `docs/spikes/S2.md`.
 - Label maps: the same tile path as images, as integer textures coloured by a
   palette texture, so class toggling needs no refetch.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
+  S3 (2026-11-13): points use DataFilterExtension categories (group ids
+  rebased to 0..k-1; at most 128 groups per layer). Polygons use one layer
+  per group, toggled by visibility, because DataFilterExtension categories
+  draw nothing on binary SolidPolygonLayer data in deck.gl 9.4.1. Toggles
+  measured 17 to 23 ms; picking 9 to 10 ms p95. Precomputed triangles cut
+  the first frame from 4.1 s to 1.6 s (5M points + 1M polygons, 700 MB GPU
+  memory). Details: `docs/spikes/S3.md`.
 - Rejected: MVT/PMTiles vector tiles (a baking pipeline, and non-geographic
   coordinates fight the tooling).
 
@@ -232,3 +239,7 @@ baseline (D5).
   D4's rejected option is revisited).
 - Whether and when to move to WebGPU; whether a Rust server is ever needed
   (only if profiling demands it).
+- Memory budget (section 2 has none): S3 measured 700 MB GPU buffers and
+  about 0.9 GB of typed arrays for 5M points and 1M polygons.
+- Zoomed-out level-of-detail threshold for polygons (D6): not tunable on the
+  workstation GPU; needs a weaker GPU or an object-count rule.

@@ -43,6 +43,17 @@ def test_levels_and_edge_tiles(client):
     assert "read;dur=" in client.get("/api/v1/images/s/tiles/3/0/0.jpg").headers["server-timing"]
 
 
+def test_spike_files_need_token(tmp_path):
+    (tmp_path / "f.arrow").write_bytes(b"abc")
+    app = create_app({}, TOKEN, {HOST}, {f"http://{HOST}"}, spike_files=tmp_path)
+    c = TestClient(app, base_url=f"http://{HOST}")
+    assert c.get("/api/v1/spike/files/f.arrow").status_code == 401
+    r = c.get("/api/v1/spike/files/f.arrow", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert r.status_code == 200 and r.content == b"abc"
+    assert c.get("/api/v1/spike/files/../pyproject.toml",
+                 headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 404
+
+
 def test_results(client, tmp_path):
     assert client.post("/api/v1/spike/results/s2-pan", json={"a": 1}).status_code == 200
     assert client.post("/api/v1/spike/results/..%2Fx", json={}).status_code in (400, 404)

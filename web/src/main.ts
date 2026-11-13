@@ -4,9 +4,11 @@
 //   no bench   interactive viewer with a HUD
 //   bench=pan  scripted zoom/pan flight, cold then warm; posts frame and tile timings
 //   bench=jitter  sub-pixel edge placement at large coordinates and deep zoom
+//   bench=annot   S3: 5M points and 1M polygons resident (see annot.ts)
 
 import { Deck, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
 import { getJSON, type ImageInfo } from "./api";
+import { runAnnot } from "./annot";
 import { runJitter } from "./jitter";
 import { runPan } from "./pan";
 import { fitZoom, makeTileLayer, TileStats } from "./tiles";
@@ -54,6 +56,10 @@ async function main() {
   const bench = params.get("bench");
   if (bench === "jitter") {
     await runJitter(hud);
+    return;
+  }
+  if (bench === "annot") {
+    await runAnnot(hud);
     return;
   }
   const images = await getJSON<ImageInfo[]>("images");

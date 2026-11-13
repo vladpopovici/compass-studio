@@ -25,7 +25,7 @@ _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
                allowed_origins: set[str], results_dir: Path | None = None,
-               web_dir: Path | None = None) -> FastAPI:
+               web_dir: Path | None = None, spike_files: Path | None = None) -> FastAPI:
     app = FastAPI(title="CompassStudio", version=API_VERSION, docs_url=None,
                   redoc_url=None, openapi_url=None)
 
@@ -91,6 +91,9 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
             out = results_dir / f"{time.strftime('%Y%m%dT%H%M%S')}-{name}.json"
             out.write_text(json.dumps(data, indent=1))
             return {"saved": out.name}
+
+    if spike_files is not None:  # spike inputs (synthetic Arrow files); token-gated
+        app.mount("/api/v1/spike/files", StaticFiles(directory=spike_files), name="spike-files")
 
     if web_dir is not None:  # built client, same origin as the API
         app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")

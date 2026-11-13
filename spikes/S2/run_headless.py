@@ -1,9 +1,9 @@
-"""Run one S2 bench page in headless Firefox and wait for its result file.
+"""Run one bench page (S2, S3) in headless Firefox and wait for its result file.
 
     python3 -I spikes/S2/run_headless.py URL [--timeout S] [--results DIR]
 
 The page posts its result to the server (--spike-results DIR); this script
-waits until a new ``*-s2-<bench>.json`` appears there, then closes Firefox.
+waits until a new ``*-s<N>-<bench>.json`` appears there, then closes Firefox.
 Headless Firefox ticks frames on a fixed ~17 ms timer, so frame intervals
 from it are a ceiling check only; judge 60 fps in a headed browser.
 """
@@ -32,7 +32,7 @@ def main() -> None:
     ap.add_argument("--size", default="1600,1000")
     a = ap.parse_args()
     bench = parse_qs(urlparse(a.url).query).get("bench", ["pan"])[0]
-    pattern = f"*-s2-{bench}.json"
+    pattern = f"*-s[0-9]-{bench}.json"
     a.results.mkdir(parents=True, exist_ok=True)
     before = set(a.results.glob(pattern))
     prof = pathlib.Path(tempfile.mkdtemp(prefix="cs-ff-"))

@@ -28,6 +28,7 @@ import pyarrow as pa
 import shapely
 
 from compass_studio.annot.schema import SCHEMA_VERSION, SQLITE_DDL, TYPE_CODE
+from compass_studio.annot.triangulate import triangulate
 
 _MASK = 512  # resolution of the tissue and class fields
 
@@ -283,6 +284,9 @@ def write_arrow(stem: Path, layers: list[Layer], p: Params) -> None:
     Coordinates are float32 level-0 pixels. Polygons are one exterior ring
     each, interleaved x, y, not closed (``coords`` list offsets / 2 are the
     vertex start indices). ``group`` is the store's ``group_id``.
+    ``triangles`` holds earcut indices local to each polygon (add the
+    polygon's vertex start for global indices), standing in for the
+    server-side triangulation of D6. Each file is a single record batch.
     """
     meta = _arrow_meta(layers, p)
     oid = 0
@@ -301,15 +305,18 @@ def write_arrow(stem: Path, layers: list[Layer], p: Params) -> None:
             offsets = np.concatenate([[0], np.cumsum(lens * 2)]).astype(np.int32)
             flat = np.concatenate(l.rings).astype(np.float32).ravel()
             coords = pa.ListArray.from_arrays(pa.array(offsets), pa.array(flat))
-            poly_tables.append(pa.table({**common, "coords": coords}))
+            starts = np.concatenate([[0], np.cumsum(lens)])
+            idx, toff = triangulate(flat.reshape(-1, 2), starts)
+            tris = pa.ListArray.from_arrays(pa.array(toff.astype(np.int32)), pa.array(idx))
+            poly_tables.append(pa.table({**common, "coords": coords, "triangles": tris}))
         oid += n
     for suffix, tables in (("points", point_tables), ("polygons", poly_tables)):
         if not tables:
             continue
-        t = pa.concat_tables(tables).replace_schema_metadata(meta)
+        t = pa.concat_tables(tables).combine_chunks().replace_schema_metadata(meta)
         with pa.OSFile(str(stem) + f".{suffix}.arrow", "wb") as f, \
                 pa.ipc.new_file(f, t.schema) as w:
-            w.write_table(t, max_chunksize=1_000_000)
+            w.write_table(t)
 
 
 def generate(out_dir: Path, name: str, p: Params, sqlite: bool = True, arrow: bool = True,

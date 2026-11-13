@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--allow-origin", action="append", default=[],
                     help="extra allowed Origin, e.g. a dev server")
     ap.add_argument("--web", type=Path, help="built client directory to serve at /")
+    ap.add_argument("--spike-files", type=Path,
+                    help="serve this directory at /api/v1/spike/files (spike inputs)")
     ap.add_argument("--spike-results", type=Path,
                     help="enable POST /api/v1/spike/results and write them here")
     a = ap.parse_args(argv)
@@ -44,13 +46,13 @@ def main(argv: list[str] | None = None) -> None:
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
-    if not images:
-        ap.error("nothing to serve: give --image or --synthetic")
+    if not images and a.spike_files is None:
+        ap.error("nothing to serve: give --image, --synthetic or --spike-files")
 
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}
     origins = {f"http://{h}" for h in hosts} | set(a.allow_origin)
-    app = create_app(images, token, hosts, origins, a.spike_results, a.web)
+    app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files)
 
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():

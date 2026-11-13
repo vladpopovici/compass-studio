@@ -48,5 +48,12 @@ def test_small_run(tmp_path):
     np.testing.assert_allclose(xy, shapely.get_coordinates(geoms[:3000]), atol=0.01)
     first = np.asarray(polys["coords"][0].as_py()).reshape(-1, 2)
     np.testing.assert_allclose(first, shapely.get_coordinates(geoms[3000])[:-1], atol=0.01)
+    # triangles cover each polygon exactly once
+    for i in (0, 1499, 1504):
+        ring = np.asarray(polys["coords"][i].as_py()).reshape(-1, 2)
+        tri = np.asarray(polys["triangles"][i].as_py()).reshape(-1, 3)
+        area = sum(abs(shapely.area(shapely.Polygon(ring[t]))) for t in tri)
+        np.testing.assert_allclose(area, shapely.area(shapely.Polygon(ring)), rtol=1e-4)
+    assert polys["coords"].num_chunks == 1
     og = dict(c.execute("SELECT object_id, group_id FROM object_groups"))
     assert [og[i] for i in pts["object_id"].to_pylist()[:50]] == pts["group"].to_pylist()[:50]
