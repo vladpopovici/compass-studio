@@ -88,7 +88,7 @@ class AnnotationStore:
         return self._conn.execute(sql, (x0, x1, y0, y1, type_code)).fetchall()
 
     def polygons(self, layer_id: int, bbox: tuple[float, float, float, float],
-                 decoder: str = "direct") -> PolygonBatch:
+                 decoder: str = "shapely") -> PolygonBatch:
         rows = self.query_rows(layer_id, bbox)
         return decode_polygons(rows, decoder)
 
@@ -108,7 +108,7 @@ class AnnotationStore:
 # WKB decoding
 # ----------------------------------------------------------------------
 
-def decode_polygons(rows: list[tuple[int, int, bytes]], decoder: str = "direct") -> PolygonBatch:
+def decode_polygons(rows: list[tuple[int, int, bytes]], decoder: str = "shapely") -> PolygonBatch:
     n = len(rows)
     oids = np.fromiter((r[0] for r in rows), np.uint32, n)
     gids = np.fromiter((r[1] for r in rows), np.uint32, n)
