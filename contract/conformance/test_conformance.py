@@ -70,6 +70,9 @@ class Checked:
         self.exercised.add((path, method.lower()))
         resp = op["responses"].get(str(r.status_code))
         assert resp is not None, f"{method} {url}: status {r.status_code} not documented"
+        if r.status_code == 304:
+            assert not r.content and "content" not in resp
+            return r
         ref = resp.get("$ref")
         if ref:
             resp = SPEC["components"]["responses"][ref.rsplit("/", 1)[1]]
@@ -150,6 +153,10 @@ def test_scenario(api):
         r = a.get(f"/images/img/tiles/0/0/0.{fmt}")
         assert r.headers["content-type"] == {"jpg": "image/jpeg", "webp": "image/webp", "png": "image/png"}[fmt]
     a.get("/images/img/tiles/0/99/0.jpg")
+    ver = imgs[0]["version"]
+    r = a.get(f"/images/img/tiles/0/0/0.jpg?v={ver}")
+    assert "immutable" in r.headers["cache-control"] and r.headers["etag"] == f'"{ver}"'
+    assert a.get("/images/img/tiles/0/0/0.jpg", headers={"If-None-Match": r.headers["etag"]}).status_code == 304
     a.get("/images/img/tiles/0/0/0.gif")
 
     stores = a.get("/stores").json()

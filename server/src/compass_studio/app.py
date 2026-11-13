@@ -44,7 +44,7 @@ from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, POINT_LAYER_VERSION, 
                           AnnotationStore, centroid_tile, encode_ipc, point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
@@ -185,10 +185,20 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         return {"id": image_id, **_image(image_id).info()}
 
     @app.get("/api/v1/images/{image_id}/tiles/{level}/{col}/{row}.{fmt}")
-    async def image_tile(image_id: str, level: int, col: int, row: int, fmt: str, q: int = 90):
+    async def image_tile(request: Request, image_id: str, level: int, col: int, row: int, fmt: str,
+                         q: int = 90, v: str | None = None):
         p = _image(image_id)
         if fmt not in _MEDIA or not 1 <= q <= 100:
             raise HTTPException(400, "format")
+        etag = f'"{p.version}"'
+        # with ?v= matching the image version the URL names fixed content
+        cache = "private, max-age=31536000, immutable" if v == p.version else "private, no-cache"
+        if p.version and etag in request.headers.get("if-none-match", ""):
+            try:
+                p.tile_shape(level, col, row)
+            except IndexError:
+                raise HTTPException(404, "no such tile") from None
+            return Response(status_code=304, headers={"ETag": etag, "Cache-Control": cache})
 
         def work():
             t0 = time.perf_counter()
@@ -202,7 +212,7 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         except IndexError:
             raise HTTPException(404, "no such tile") from None
         return Response(body, media_type=_MEDIA[fmt],
-                        headers={"Cache-Control": "private, max-age=3600",
+                        headers={"Cache-Control": cache, "ETag": etag,
                                  "Server-Timing": f"read;dur={tr * 1e3:.2f}, encode;dur={te * 1e3:.2f}"})
 
     # -- stores and layers ------------------------------------------------

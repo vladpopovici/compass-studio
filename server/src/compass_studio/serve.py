@@ -9,7 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from .app import Dataset, create_app
-from .imaging.pyramid import SyntheticPyramid, ZarrPyramid
+from .imaging.pyramid import SyntheticPyramid, ZarrPyramid, find_images
 
 
 def _kv(s: str) -> tuple[str, str]:
@@ -25,6 +25,8 @@ def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--image", type=_kv, action="append", default=[], metavar="ID=PATH",
                     help="COMPASS .zarr folder to serve (repeatable)")
+    ap.add_argument("--images", type=Path, action="append", default=[], metavar="DIR",
+                    help="serve every COMPASS .zarr folder directly in DIR, id = folder name (repeatable)")
     ap.add_argument("--synthetic", type=_kv, action="append", default=[], metavar="ID=WxH",
                     help="procedural test pyramid, e.g. synth200k=200000x200000")
     ap.add_argument("--annotations", type=_kv, action="append", default=[], metavar="ID=PATH",
@@ -55,7 +57,21 @@ def main(argv: list[str] | None = None) -> None:
     if a.web is not None and not (a.web / "index.html").is_file():
         ap.error(f"--web {a.web}: no index.html; build the client first "
                  "(cd web && pnpm install && pnpm build)")
-    images = {k: ZarrPyramid(v, reader=a.reader) for k, v in a.image}
+    paths = dict(a.image)
+    for d in a.images:
+        if not d.is_dir():
+            ap.error(f"--images {d}: not a directory")
+        try:
+            found = find_images(d)
+        except ValueError as e:
+            ap.error(f"--images {d}: {e}")
+        if not found:
+            ap.error(f"--images {d}: no .zarr images")
+        for k, v in found.items():
+            if k in paths:
+                ap.error(f"image id {k!r} given twice; use --image ID=PATH to rename one")
+            paths[k] = str(v)
+    images = {k: ZarrPyramid(v, reader=a.reader) for k, v in paths.items()}
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
@@ -69,7 +85,7 @@ def main(argv: list[str] | None = None) -> None:
             sidecar = d / f"{k}.curation.sqlite"
         datasets[k] = Dataset.open(k, store, sidecar)
     if not images and not datasets and a.spike_files is None:
-        ap.error("nothing to serve: give --image, --synthetic, --annotations or --spike-files")
+        ap.error("nothing to serve: give --image, --images, --synthetic, --annotations or --spike-files")
 
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}

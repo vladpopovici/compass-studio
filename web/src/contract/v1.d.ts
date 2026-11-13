@@ -62,6 +62,11 @@ export interface paths {
             query?: {
                 /** @description JPEG quality (ignored for webp and png). */
                 q?: number;
+                /**
+                 * @description Since 1.1.0. The image's `version`. When it matches, the response
+                 *     is cacheable as immutable; otherwise the client must revalidate.
+                 */
+                v?: string;
             };
             header?: never;
             path: {
@@ -78,6 +83,8 @@ export interface paths {
          * One image tile
          * @description 512 x 512 px, cropped at the right and bottom edges of a level. RGB.
          *     May carry a `Server-Timing` header (read, encode) for diagnostics.
+         *     Since 1.1.0 responses carry an `ETag` (the image version) and a
+         *     request with a matching `If-None-Match` gets 304.
          */
         get: operations["getImageTile"];
         put?: never;
@@ -453,6 +460,15 @@ export interface components {
             mpp: number | null;
             /** @description zarr or synthetic. */
             kind: string;
+            /** @description Display name (since 1.1.0). */
+            name?: string | null;
+            /** @description Objective magnification at level 0, if known (since 1.1.0). */
+            objective_power?: number | null;
+            /**
+             * @description Opaque; changes whenever tile content may change (since 1.1.0).
+             *     Pass it as the tiles' `v` parameter.
+             */
+            version?: string;
         };
         Store: {
             id: string;
@@ -713,6 +729,11 @@ export interface operations {
             query?: {
                 /** @description JPEG quality (ignored for webp and png). */
                 q?: number;
+                /**
+                 * @description Since 1.1.0. The image's `version`. When it matches, the response
+                 *     is cacheable as immutable; otherwise the client must revalidate.
+                 */
+                v?: string;
             };
             header?: never;
             path: {
@@ -737,6 +758,13 @@ export interface operations {
                     "image/webp": string;
                     "image/png": string;
                 };
+            };
+            /** @description Not modified (since 1.1.0) */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];

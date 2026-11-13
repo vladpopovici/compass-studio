@@ -2,6 +2,8 @@
 
 The HTTP contract between the CompassStudio server and client (decision D2).
 **Frozen 2026-11-13** after spikes S1 to S6.
+Current: 1.1.0 (additive: image name, objective power and version;
+cacheable image tiles with `v`, `ETag` and 304).
 
 - `openapi.yaml`: the JSON API, OpenAPI 3.1, served under `/api/v1`.
 - `schemas/`: binary payloads (Arrow IPC), versioned separately:
@@ -27,6 +29,8 @@ Binary schemas never change once released; a change is a new version (see
   sidecar get ids from 2^40.
 - Layer ids: opaque strings, `{store}:{layer}` (read-only) and
   `{store}:edit:{layer}` (editable).
+- Image tiles: request them with `?v={Image.version}`; such responses are
+  immutable for the browser cache.
 - Polygon tiles up to `polygon_max_level` (3), centroid tiles above (S4).
 - Edits: batched operations against `base_revision` (409 on a stale base,
   422 on invalid operations or geometry); undo by committing a logged

@@ -5,6 +5,7 @@ level-0 pixels ``[i * 2**l, (i + 1) * 2**l)``. Tiles are ``tile x tile``
 except at the right and bottom edges, where they are cropped.
 """
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -33,12 +34,16 @@ class Pyramid:
     mpp: float | None
     kind: str
     fast_levels: list[bool] = field(default_factory=list)
+    name: str | None = None
+    objective_power: float | None = None
+    version: str = ""  # opaque; changes whenever tile content may change
 
     def info(self) -> dict:
         return {"width": self.width, "height": self.height, "tile_size": self.tile,
                 "levels": [{"width": l.width, "height": l.height, "downsample": 2 ** i}
                            for i, l in enumerate(self.levels)],
-                "channels": self.channels, "mpp": self.mpp, "kind": self.kind}
+                "channels": self.channels, "mpp": self.mpp, "kind": self.kind,
+                "name": self.name, "objective_power": self.objective_power, "version": self.version}
 
     def tile_shape(self, level: int, col: int, row: int) -> tuple[int, int]:
         """(height, width) of a tile; IndexError outside the grid."""
@@ -78,7 +83,10 @@ class ZarrPyramid(Pyramid):
             levels=[LevelInfo(width=s[1], height=s[0]) for s in shapes],
             tile=int(chunk[0]), channels=list(attrs.get("channel_names", [])),
             mpp=attrs.get("base_mpp"), kind="zarr",
-            fast_levels=[f is not None for f in self._fast])
+            fast_levels=[f is not None for f in self._fast],
+            name=path.name.removesuffix(".zarr"),
+            objective_power=_number(attrs.get("base_objective_power")),
+            version=_fingerprint([path / "zarr.json"] + [path / str(i) / "zarr.json" for i in range(n)]))
 
     def read_tile(self, level: int, col: int, row: int) -> np.ndarray:
         h, w = self.tile_shape(level, col, row)
@@ -108,7 +116,8 @@ class SyntheticPyramid(Pyramid):
                   for i in range(n)]
         super().__init__(width=width, height=height, levels=levels, tile=tile,
                          channels=["R", "G", "B"], mpp=0.5, kind="synthetic",
-                         fast_levels=[False] * n)
+                         fast_levels=[False] * n, name=f"synthetic {width}x{height}",
+                         version=f"synth-{width}x{height}-{tile}-{grid}-1")
         self.grid = grid
 
     def read_tile(self, level: int, col: int, row: int) -> np.ndarray:
@@ -128,6 +137,36 @@ class SyntheticPyramid(Pyramid):
         d.rectangle([0, 0, w - 1, h - 1], outline=(0, 0, 0))
         d.text((6, 4), f"L{level} c{col} r{row}\nx0={x0} y0={y0}", fill=(0, 0, 0))
         return np.asarray(base)
+
+
+def _number(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _fingerprint(files: list[Path]) -> str:
+    """Hash of the metadata files' contents, sizes and modification times.
+
+    COMPASS images are written once; re-importing rewrites ``zarr.json``, so
+    this changes whenever the pixels may have changed."""
+    h = hashlib.sha256()
+    for f in files:
+        st = f.stat()
+        h.update(f"{f.relative_to(files[0].parent)}:{st.st_size}:{st.st_mtime_ns}:".encode())
+        h.update(f.read_bytes())
+    return h.hexdigest()[:16]
+
+
+def find_images(folder: str | Path) -> dict[str, Path]:
+    """COMPASS images (``*.zarr`` folders with a ``zarr.json``) directly in
+    ``folder``, keyed by an id made from the folder name."""
+    out: dict[str, Path] = {}
+    for p in sorted(Path(folder).iterdir()):
+        if p.is_dir() and p.suffix == ".zarr" and (p / "zarr.json").is_file():
+            k = "".join(ch if ch.isalnum() or ch in "_-." else "-" for ch in p.name.removesuffix(".zarr"))
+            if k in out:
+                raise ValueError(f"two images map to id {k!r}")
+            out[k] = p
+    return out
 
 
 def _hsv(h: float, s: float, v: float) -> tuple[int, int, int]:

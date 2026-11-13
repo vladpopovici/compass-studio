@@ -94,6 +94,9 @@ later because the client depends only on the contract (D2).
   Conformance tests run with the server's test suite; TypeScript types are
   generated with openapi-typescript (in its own package, `web/tools/gen-api`,
   because it needs the TypeScript 5 compiler API).
+  1.1.0 (2026-11-13, milestone 3, additive): image `name`,
+  `objective_power` and `version`; image tiles with `?v={version}` are
+  immutable in the browser cache, others revalidate (`ETag`, 304).
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -123,6 +126,11 @@ test fixtures must never copy them.
   457 kB for PNG level 1). Disk cache for transcoded tiles: S1 measured JPEG
   q90 encoding at about 0.5 ms and a tile read at about 1.5 ms, so the cache
   is deferred until slow storage (network mounts) makes it worthwhile.
+- Browser caching (2026-11-13): an image's `version` hashes its `zarr.json`
+  files (contents, sizes, modification times), which a re-import rewrites.
+  Tiles requested with `?v=` the current version are sent as
+  `private, max-age=31536000, immutable`; without it, `no-cache` with an
+  `ETag`, so a stale id-to-path mapping never shows old pixels.
 - Tile work runs on a dedicated thread pool, one thread per CPU (S1: about
   15 % more throughput than Starlette's default pool).
 - Multichannel: raw per-channel tiles with shader-side channel mixing and LUTs.

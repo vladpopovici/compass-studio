@@ -33,7 +33,7 @@ def test_security(client):
 
 def test_info(client):
     i = client.get("/api/v1/info").json()
-    assert i["api_version"] == "1.0.0" and "edit" in i["capabilities"]
+    assert i["api_version"] == "1.1.0" and "edit" in i["capabilities"]
     assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"]}
 
 
@@ -49,6 +49,22 @@ def test_image_tiles(client):
     assert r.headers["content-type"] == "image/webp"
     im = np.asarray(Image.open(io.BytesIO(r.content)).convert("RGB"))
     np.testing.assert_array_equal(im, SyntheticPyramid(3000, 1200).read_tile(0, 0, 0))  # lossless
+
+
+def test_tile_caching(client):
+    info = client.get("/api/v1/images/img").json()
+    ver = info["version"]
+    assert ver and info["name"] and info["objective_power"] is None
+    r = client.get("/api/v1/images/img/tiles/0/0/0.jpg")
+    assert r.headers["cache-control"] == "private, no-cache" and r.headers["etag"] == f'"{ver}"'
+    r = client.get(f"/api/v1/images/img/tiles/0/0/0.jpg?v={ver}")
+    assert r.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert client.get("/api/v1/images/img/tiles/0/0/0.jpg?v=old").headers["cache-control"] == "private, no-cache"
+    r = client.get("/api/v1/images/img/tiles/0/0/0.jpg", headers={"If-None-Match": f'"{ver}"'})
+    assert r.status_code == 304 and not r.content
+    assert client.get("/api/v1/images/img/tiles/0/0/0.jpg", headers={"If-None-Match": '"x"'}).status_code == 200
+    assert client.get("/api/v1/images/img/tiles/0/99/0.jpg",
+                      headers={"If-None-Match": f'"{ver}"'}).status_code == 404
 
 
 def test_layers_points_tiles(client):
