@@ -12,7 +12,7 @@ dependencies = [
     "shapely>=2.1.2,<3.0.0",
     "pyarrow>=18",
     "fastapi>=0.115",
-    "uvicorn>=0.32",
+    "uvicorn[standard]>=0.32",
     "pillow>=11",
     "mapbox-earcut>=1.0",
 ]

@@ -298,7 +298,9 @@ baseline (D5).
   (S1 tile set, 4 CPUs): uvicorn with httptools + uvloop and Granian 2.8 both
   gave about 1,100 to 1,150 tiles/s against 1,030 for uvicorn with h11, i.e.
   8 to 12 %, close to run-to-run noise; the overhead is in the Python app,
-  not the HTTP parser. Granian is not worth a switch. HTTP/2 is ruled out
+  not the HTTP parser. Granian is not worth a switch; the server depends on
+  `uvicorn[standard]` (httptools + uvloop, picked automatically; plain asyncio
+  where uvloop is unavailable). HTTP/2 is ruled out
   for now: browsers only use it over TLS, which on 127.0.0.1 means
   self-signed certificates or a locally installed CA.
 - Zoomed-out level of detail (D6): v1 switches to centroids above level 3
