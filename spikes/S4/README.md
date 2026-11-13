@@ -1,5 +1,12 @@
 # S4: SQLite read path
 
-Per-tile bbox query on the R-tree, WKB decode (shapely), triangulation and
-Arrow encode, on the synthetic store at several densities and zoom levels,
-spatial vs random object order. Pass: per-tile p95 within the latency budget.
+Per-tile R-tree query, WKB decode, earcut and Arrow encode on the synthetic
+stores, by level, placement, object order and thread count.
+
+    cd server
+    uv run compass-studio-synth ../data/synth --name full
+    uv run compass-studio-synth ../data/synth --name fullrand --order random --no-arrow
+    taskset -c 0-3 uv run python ../spikes/S4/bench.py \
+        ../data/synth/full.ann.sqlite ../data/synth/fullrand.ann.sqlite
+
+Results: `docs/spikes/S4.md`.

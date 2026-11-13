@@ -41,6 +41,10 @@ Measured on a low-end reference machine (laptop, integrated GPU only):
 - Group visibility toggle under 50 ms.
 - Edit check-out and commit round trip under 100 ms.
 
+- Memory (set 2026-11-13): the machine has 32 GB RAM. A discrete GPU is
+  optional: the viewer must run on integrated graphics, which shares system
+  RAM, so GPU buffers count against the same 32 GB.
+
 These are proposals to be confirmed or adjusted by the spikes.
 
 Spike runs (revised 2026-11-13): after S2, all spikes run on the development
@@ -131,7 +135,12 @@ milestone 3). Details: `docs/spikes/S2.md`.
   filtered and picked. Attributes are fetched lazily by object id.
 - Polygons: R-tree viewport query on the server, triangulation on the server,
   delivered as tiles. Zoomed out, polygons are replaced by centroids or a
-  density raster (thresholds tuned in S3).
+  density raster (thresholds tuned in S3). S4 (2026-11-13): server cost per
+  512 px tile is under 15 ms p95 up to level 3 and 40 to 63 ms at level 4
+  (about 5k polygons, 2 MB), so the proposed switch to centroids or density
+  is above level 3. The read path is GIL-bound (4 threads give no speed-up);
+  exporting a 5M point layer takes 5.7 s and needs a cache. Details:
+  `docs/spikes/S4.md`.
 - Label maps: the same tile path as images, as integer textures coloured by a
   palette texture, so class toggling needs no refetch.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
@@ -239,7 +248,5 @@ baseline (D5).
   D4's rejected option is revisited).
 - Whether and when to move to WebGPU; whether a Rust server is ever needed
   (only if profiling demands it).
-- Memory budget (section 2 has none): S3 measured 700 MB GPU buffers and
-  about 0.9 GB of typed arrays for 5M points and 1M polygons.
 - Zoomed-out level-of-detail threshold for polygons (D6): not tunable on the
   workstation GPU; needs a weaker GPU or an object-count rule.
