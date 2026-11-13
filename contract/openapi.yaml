@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CompassStudio
-  version: 1.2.0
+  version: 1.3.0
   summary: Contract between the CompassStudio server and its browser client.
   description: |
     Frozen 2026-11-13 (decision log D2). Under `/api/v1` only backward-compatible
@@ -13,6 +13,8 @@ info:
     `Image.version`; image tiles take `v` and answer conditional requests.
     1.2.0 (2026-11-13, additive): label maps. `Image.role` ("labels"),
     `dtype`, `aligned_to`, `classes`, `background`; tile format `bin`.
+    1.3.0 (2026-11-13, additive): `Store.aligned_to`, the image a store
+    annotates.
 
     Conventions:
     - Coordinates are level-0 pixels of the image; microns via `mpp`.
@@ -653,6 +655,11 @@ components:
         mpp: { type: [number, "null"] }
         editable: { type: boolean, description: "Has a sidecar." }
         revision: { type: integer, minimum: 0, description: "Sidecar revision; 0 without one." }
+        aligned_to:
+          type: [string, "null"]
+          description: |
+            Id of the image the store annotates (its level-0 px), or null if the
+            server paired it with none. Since 1.3.0; absent from older servers.
 
     Group:
       type: object

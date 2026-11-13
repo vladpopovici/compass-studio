@@ -508,6 +508,11 @@ export interface components {
             editable: boolean;
             /** @description Sidecar revision; 0 without one. */
             revision: number;
+            /**
+             * @description Id of the image the store annotates (its level-0 px), or null if the
+             *     server paired it with none. Since 1.3.0; absent from older servers.
+             */
+            aligned_to?: string | null;
         };
         Group: {
             /** @description Group id used in edit operations. */

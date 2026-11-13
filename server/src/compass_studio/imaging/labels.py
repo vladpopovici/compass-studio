@@ -54,32 +54,38 @@ def classes_file_for(path: str | Path) -> Path | None:
     return f if f.is_file() else None
 
 
+def pair_with_image(kind: str, key: str, size: tuple[int, int] | None, images: dict[str, Pyramid],
+                    target: str | None, flag: str) -> str:
+    """The image something belongs to: ``target`` if given, else the image
+    whose id is the longest dotted prefix of ``key`` (``slide.regions`` ->
+    ``slide``), else the only image served. ``size`` (if known) must match.
+    Raises ValueError naming ``flag`` when nothing fits."""
+    if target is None:
+        parts = key.split(".")
+        for n in range(len(parts) - 1, 0, -1):
+            if ".".join(parts[:n]) in images:
+                target = ".".join(parts[:n])
+                break
+    if target is None and len(images) == 1:
+        target = next(iter(images))
+    if target is None:
+        raise ValueError(f"{kind} {key!r}: which image does it belong to? use {flag} {key}=IMAGE")
+    if target not in images:
+        raise ValueError(f"{kind} {key!r}: no image {target!r}")
+    im = images[target]
+    if size is not None and size != (im.width, im.height):
+        raise ValueError(f"{kind} {key!r} is {size[0]}x{size[1]}, image {target!r} is "
+                         f"{im.width}x{im.height}: they must be pixel-aligned 1:1")
+    return target
+
+
 def pair_labels(labels: dict[str, Pyramid], images: dict[str, Pyramid],
                 explicit: dict[str, str] | None = None) -> None:
-    """Set ``aligned_to`` on every label map: the explicit choice, else the
-    image whose id is the longest dotted prefix of the map's id
-    (``slide.regions`` -> ``slide``), else the only image served.
-    Raises ValueError if none fits or the sizes differ."""
+    """Set ``aligned_to`` on every label map (see :func:`pair_with_image`)."""
     explicit = explicit or {}
     for k, lab in labels.items():
-        target = explicit.get(k)
-        if target is None:
-            parts = k.split(".")
-            for n in range(len(parts) - 1, 0, -1):
-                if ".".join(parts[:n]) in images:
-                    target = ".".join(parts[:n])
-                    break
-        if target is None and len(images) == 1:
-            target = next(iter(images))
-        if target is None:
-            raise ValueError(f"label map {k!r}: which image does it belong to? use --label-of {k}=IMAGE")
-        if target not in images:
-            raise ValueError(f"label map {k!r}: no image {target!r}")
-        im = images[target]
-        if (lab.width, lab.height) != (im.width, im.height):
-            raise ValueError(f"label map {k!r} is {lab.width}x{lab.height}, image {target!r} is "
-                             f"{im.width}x{im.height}: maps must be pixel-aligned 1:1")
-        lab.aligned_to = target
+        lab.aligned_to = pair_with_image("label map", k, (lab.width, lab.height), images,
+                                         explicit.get(k), "--label-of")
 
 
 class SyntheticLabels(Pyramid):

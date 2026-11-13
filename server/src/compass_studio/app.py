@@ -45,7 +45,7 @@ from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, POINT_LAYER_VERSION, 
                           AnnotationStore, centroid_tile, encode_ipc, point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.2.0"
+API_VERSION = "1.3.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
@@ -98,6 +98,11 @@ class Dataset:
     view: AnnotationStore | None = None          # read-only connections to the sidecar file
     edit_pool: ThreadPoolExecutor | None = None
     cache: dict = field(default_factory=dict)    # (layer id, revision) -> point-layer bytes
+    aligned_to: str | None = None                # id of the image it annotates
+
+    def size(self) -> tuple[int, int] | None:
+        w, h = _int(self.store.meta.get("image_width")), _int(self.store.meta.get("image_height"))
+        return (w, h) if w and h else None
 
     @classmethod
     def open(cls, store_id: str, store_path: Path, sidecar_path: Path | None) -> "Dataset":
@@ -248,7 +253,8 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         m = ds.store.meta
         return {"id": ds.id, "name": m.get("name") or ds.id,
                 "image_width": _int(m.get("image_width")), "image_height": _int(m.get("image_height")),
-                "mpp": _float(m.get("mpp")), "editable": ds.sidecar is not None, "revision": ds.revision()}
+                "mpp": _float(m.get("mpp")), "editable": ds.sidecar is not None, "revision": ds.revision(),
+                "aligned_to": ds.aligned_to}
 
     def _layer_info(ds: Dataset, view: AnnotationStore, lid: int, editable: bool) -> dict:
         forked = None

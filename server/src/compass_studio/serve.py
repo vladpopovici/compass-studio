@@ -9,7 +9,8 @@ from pathlib import Path
 import uvicorn
 
 from .app import Dataset, create_app
-from .imaging.labels import SyntheticLabels, classes_file_for, load_classes, pair_labels
+from .imaging.labels import (SyntheticLabels, classes_file_for, load_classes, pair_labels,
+                              pair_with_image)
 from .imaging.pyramid import SyntheticPyramid, ZarrPyramid, find_images
 
 
@@ -20,6 +21,17 @@ def _kv(s: str) -> tuple[str, str]:
     if not all(ch.isalnum() or ch in "_-." for ch in k):
         raise argparse.ArgumentTypeError(f"id {k!r}: use letters, digits, '_', '-', '.'")
     return k, v
+
+
+def find_stores(folder: Path) -> dict[str, Path]:
+    """COMPASS annotation stores (``*.ann.sqlite``) directly in ``folder``,
+    keyed by the file name without ``.ann.sqlite``."""
+    out: dict[str, Path] = {}
+    for p in sorted(folder.glob("*.ann.sqlite")):
+        if p.is_file():
+            k = "".join(ch if ch.isalnum() or ch in "_-." else "-" for ch in p.name.removesuffix(".ann.sqlite"))
+            out[k] = p
+    return out
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -42,6 +54,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="procedural test label map the size of IMAGE")
     ap.add_argument("--annotations", type=_kv, action="append", default=[], metavar="ID=PATH",
                     help="COMPASS annotation store (.ann.sqlite) to serve (repeatable)")
+    ap.add_argument("--annotations-of", type=_kv, action="append", default=[], metavar="ID=IMAGE",
+                    help="the image an annotation store belongs to (default: the image whose id prefixes "
+                         "the store's, as in slide / slide.cells, or the only image if the sizes match)")
     ap.add_argument("--sidecar-dir", type=Path,
                     help="directory for sidecar curation databases, one per store, named "
                          "<ID>.curation.sqlite (default: next to each store)")
@@ -69,6 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         ap.error(f"--web {a.web}: no index.html; build the client first "
                  "(cd web && pnpm install && pnpm build)")
     paths = dict(a.image)
+    found_stores: dict[str, str] = {}
     for d in a.images:
         if not d.is_dir():
             ap.error(f"--images {d}: not a directory")
@@ -76,8 +92,13 @@ def main(argv: list[str] | None = None) -> None:
             found = find_images(d)
         except ValueError as e:
             ap.error(f"--images {d}: {e}")
-        if not found:
+        stores_found = find_stores(d)
+        if not found and not stores_found:
             ap.error(f"--images {d}: no .zarr images")
+        for k, v in stores_found.items():
+            if k in found_stores:
+                ap.error(f"annotation store id {k!r} given twice")
+            found_stores[k] = str(v)
         for k, v in found.items():
             if k in paths:
                 ap.error(f"image id {k!r} given twice; use --image ID=PATH to rename one")
@@ -116,7 +137,8 @@ def main(argv: list[str] | None = None) -> None:
         ap.error(str(e))
     images |= labels
     datasets = {}
-    for k, v in a.annotations:
+    stores = found_stores | dict(a.annotations)
+    for k, v in stores.items():
         store = Path(v)
         sidecar = None
         if not a.read_only:
@@ -124,6 +146,21 @@ def main(argv: list[str] | None = None) -> None:
             d.mkdir(parents=True, exist_ok=True)
             sidecar = d / f"{k}.curation.sqlite"
         datasets[k] = Dataset.open(k, store, sidecar)
+    store_of = dict(a.annotations_of)
+    for k in store_of:
+        if k not in datasets:
+            ap.error(f"--annotations-of {k}: no such annotation store")
+    slides = {k: p for k, p in images.items() if p.role == "image"}
+    for k, ds in datasets.items() if slides else ():
+        try:
+            ds.aligned_to = pair_with_image("annotation store", k, ds.size(), slides, store_of.get(k),
+                                            "--annotations-of")
+        except ValueError as e:
+            named = k in store_of or any(k.startswith(i + ".") for i in slides)
+            if named:
+                ap.error(str(e))
+            # guessed (no name match): served, but not shown on any image
+            print(f"  note: {e}; not shown on an image", flush=True)
     if not images and not datasets and a.spike_files is None:
         ap.error("nothing to serve: give --image, --images, --synthetic, --annotations or --spike-files")
 
@@ -140,6 +177,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  {what}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
               f"fast path {sum(p.fast_levels)}/{len(p.levels)} levels", flush=True)
     for k, ds in datasets.items():
-        print(f"  annotations {k}: {len(ds.store.layers)} layers"
+        print(f"  annotations {k}" + (f" (on {ds.aligned_to})" if ds.aligned_to else "")
+              + f": {len(ds.store.layers)} layers"
               + (f", sidecar {ds.sidecar.path}" if ds.sidecar else ", read-only"), flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
