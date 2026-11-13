@@ -1,37 +1,746 @@
 openapi: 3.1.0
 info:
   title: CompassStudio
-  version: 0.0.0
-  description: Draft. Not frozen until the spikes are done (docs/decisions.md section 6).
+  version: 1.0.0
+  summary: Contract between the CompassStudio server and its browser client.
+  description: |
+    Frozen 2026-11-13 (decision log D2). Under `/api/v1` only backward-compatible
+    changes are allowed: new endpoints, new optional fields, new capabilities,
+    new enum values announced through `/info`. Anything else needs `/api/v2`.
+    Binary payloads (Arrow IPC) are versioned separately in `schemas/`.
+
+    Conventions:
+    - Coordinates are level-0 pixels of the image; microns via `mpp`.
+    - Object ids are integers in [0, 2^53): exact as JSON numbers and as
+      Arrow int64. Objects created in a sidecar have ids >= 2^40.
+    - Layer ids are opaque strings: `{store}:{layer}` (read-only store) or
+      `{store}:edit:{layer}` (editable sidecar layer). Clients must not parse
+      them beyond equality.
+    - Group ids are integers unique within a store or sidecar; binary payloads
+      carry the group's `index` within its layer (0..k-1) instead.
+    - Tiles are 512 px at level l, covering 512 * 2^l level-0 px, for images
+      and annotation layers alike.
+    - Errors are JSON objects with a `detail` field.
 servers:
   - url: /api/v1
+security:
+  - session: []
+
+tags:
+  - name: info
+  - name: images
+  - name: annotations
+  - name: editing
+  - name: events
+
 paths:
   /info:
     get:
-      summary: API version, capabilities and supported schema versions
+      tags: [info]
+      summary: API version, capabilities and supported binary schema versions
+      operationId: getInfo
       responses:
         "200":
           description: Server information
           content:
             application/json:
+              schema: { $ref: "#/components/schemas/Info" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /images:
+    get:
+      tags: [images]
+      summary: Images served
+      operationId: listImages
+      responses:
+        "200":
+          description: Images
+          content:
+            application/json:
               schema:
-                $ref: "#/components/schemas/Info"
+                type: array
+                items: { $ref: "#/components/schemas/Image" }
+
+  /images/{image_id}:
+    parameters:
+      - $ref: "#/components/parameters/ImageId"
+    get:
+      tags: [images]
+      summary: One image
+      operationId: getImage
+      responses:
+        "200":
+          description: Image
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Image" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /images/{image_id}/tiles/{level}/{col}/{row}.{format}:
+    parameters:
+      - $ref: "#/components/parameters/ImageId"
+      - $ref: "#/components/parameters/Level"
+      - $ref: "#/components/parameters/Col"
+      - $ref: "#/components/parameters/Row"
+      - name: format
+        in: path
+        required: true
+        description: jpg for navigation; webp (lossless) or png for exact pixels.
+        schema: { type: string, enum: [jpg, webp, png] }
+      - name: q
+        in: query
+        description: JPEG quality (ignored for webp and png).
+        schema: { type: integer, minimum: 1, maximum: 100, default: 90 }
+    get:
+      tags: [images]
+      summary: One image tile
+      description: |
+        512 x 512 px, cropped at the right and bottom edges of a level. RGB.
+        May carry a `Server-Timing` header (read, encode) for diagnostics.
+      operationId: getImageTile
+      responses:
+        "200":
+          description: Tile
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /stores:
+    get:
+      tags: [annotations]
+      summary: Annotation stores served
+      operationId: listStores
+      responses:
+        "200":
+          description: Stores
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Store" }
+
+  /stores/{store_id}:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+    get:
+      tags: [annotations]
+      summary: One store
+      operationId: getStore
+      responses:
+        "200":
+          description: Store
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Store" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /stores/{store_id}/attributes:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+    get:
+      tags: [annotations]
+      summary: Names of the scalar attributes in the store and its sidecar
+      operationId: listAttributes
+      responses:
+        "200":
+          description: Attribute names
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [store_id, attributes]
+                properties:
+                  store_id: { type: string }
+                  attributes:
+                    type: array
+                    items: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers:
+    get:
+      tags: [annotations]
+      summary: Layers of all stores (or of one), read-only and editable
+      operationId: listLayers
+      parameters:
+        - name: store
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Layers
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Layer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+    get:
+      tags: [annotations]
+      summary: One layer
+      operationId: getLayer
+      responses:
+        "200":
+          description: Layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Layer" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/points:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+    get:
+      tags: [annotations]
+      summary: All point objects of a layer
+      description: |
+        One Arrow IPC stream, schema `point-layer` v1 (`schemas/point-layer.v1.md`).
+        Empty for layers without points. `ETag` changes with the layer's revision.
+      operationId: getLayerPoints
+      responses:
+        "200":
+          description: Point buffer
+          content:
+            application/vnd.apache.arrow.stream: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/tiles/{level}/{col}/{row}:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+      - $ref: "#/components/parameters/Level"
+      - $ref: "#/components/parameters/Col"
+      - $ref: "#/components/parameters/Row"
+    get:
+      tags: [annotations]
+      summary: Polygons of a layer in one tile
+      description: |
+        Up to the layer's `polygon_max_level`: Arrow `polygon-tile` v1, every
+        polygon whose bounding box meets the tile (a polygon can appear in
+        several tiles; clients deduplicate by `object_id`). Above it: Arrow
+        `centroid-tile` v1, the centre of each polygon's bounding box, each
+        object in exactly one tile. The payload's `schema` metadata tells which.
+        `ETag` changes with the layer's revision.
+      operationId: getLayerTile
+      responses:
+        "200":
+          description: Polygon or centroid tile
+          content:
+            application/vnd.apache.arrow.stream: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/features:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+      - $ref: "#/components/parameters/Ids"
+    get:
+      tags: [annotations, editing]
+      summary: Objects as GeoJSON (check-out for editing)
+      operationId: getFeatures
+      responses:
+        "200":
+          description: Features with the revision they were read at
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeatureCollection" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/objects:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+      - $ref: "#/components/parameters/Ids"
+    get:
+      tags: [annotations]
+      summary: Attributes of objects (fetched lazily by id)
+      operationId: getObjects
+      responses:
+        "200":
+          description: Objects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [layer_id, objects]
+                properties:
+                  layer_id: { type: string }
+                  objects:
+                    type: array
+                    items: { $ref: "#/components/schemas/ObjectInfo" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/fork:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+    post:
+      tags: [editing]
+      summary: Copy a read-only store layer into the sidecar as an editable layer
+      description: Advances the store revision. Can take seconds for large layers.
+      operationId: forkLayer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1 }
+      responses:
+        "201":
+          description: The new editable layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Layer" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /stores/{store_id}/layers:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+    post:
+      tags: [editing]
+      summary: Create an empty editable layer
+      description: Advances the store revision.
+      operationId: createLayer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, groups]
+              properties:
+                name: { type: string, minLength: 1 }
+                groups:
+                  description: Distinct group names, in index order.
+                  type: array
+                  items: { type: string, minLength: 1 }
+      responses:
+        "201":
+          description: The new editable layer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Layer" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /stores/{store_id}/revision:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+    get:
+      tags: [editing]
+      summary: Current revision of the store's sidecar
+      operationId: getRevision
+      responses:
+        "200":
+          description: Revision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [store_id, revision]
+                properties:
+                  store_id: { type: string }
+                  revision: { type: integer, minimum: 0 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /stores/{store_id}/commit:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+    post:
+      tags: [editing]
+      summary: Apply a batch of operations atomically
+      description: |
+        Applied only if `base_revision` is the current revision; then the
+        revision advances by one and the batch, with its inverse, is logged.
+        Undo = commit the logged `inverse`; redo = commit the logged `ops`
+        again. Only editable (sidecar) layers' objects and groups can be
+        named. Geometries must be valid (no self-intersections).
+      operationId: commit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommitRequest" }
+      responses:
+        "200":
+          description: Committed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [store_id, revision, created]
+                properties:
+                  store_id: { type: string }
+                  revision: { type: integer, minimum: 1 }
+                  created:
+                    description: Ids of objects created by `create` ops, in op order.
+                    type: array
+                    items: { $ref: "#/components/schemas/ObjectId" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: base_revision is stale; nothing was applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail, current_revision]
+                properties:
+                  detail: { type: string }
+                  current_revision: { type: integer, minimum: 0 }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /stores/{store_id}/log:
+    parameters:
+      - $ref: "#/components/parameters/StoreId"
+      - name: since
+        in: query
+        description: Return batches with revision > since.
+        schema: { type: integer, minimum: 0, default: 0 }
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    get:
+      tags: [editing]
+      summary: Committed batches, oldest first
+      operationId: getLog
+      responses:
+        "200":
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [store_id, entries]
+                properties:
+                  store_id: { type: string }
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/LogEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /events:
+    get:
+      tags: [events]
+      summary: Server-sent events
+      description: |
+        `text/event-stream`. First `event: hello` with data
+        `{"api_version", "revisions": {store_id: revision}}`, then
+        `event: revision` with data `{"store_id", "revision", "client"}` whenever
+        a sidecar's revision changes, whether by this server or by another
+        process writing the sidecar. Comment lines keep the connection alive.
+        Events can be dropped for slow clients: on reconnect, compare
+        revisions and re-read. Browsers' `EventSource` cannot send the
+        `Authorization` header; read the stream with `fetch()` instead.
+      operationId: getEvents
+      responses:
+        "200":
+          description: Event stream
+          content:
+            text/event-stream: { schema: { type: string } }
+
 components:
+  securitySchemes:
+    session:
+      type: http
+      scheme: bearer
+      description: |
+        Random per-session token printed by the server at start. The server
+        also checks the Host header (DNS rebinding) and any Origin header
+        against its own address (D10).
+
+  parameters:
+    ImageId:
+      name: image_id
+      in: path
+      required: true
+      schema: { type: string }
+    StoreId:
+      name: store_id
+      in: path
+      required: true
+      schema: { type: string }
+    LayerId:
+      name: layer_id
+      in: path
+      required: true
+      schema: { type: string }
+    Level:
+      name: level
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+    Col:
+      name: col
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+    Row:
+      name: row
+      in: path
+      required: true
+      schema: { type: integer, minimum: 0 }
+    Ids:
+      name: ids
+      in: query
+      required: true
+      description: Comma-separated object ids, 1 to 1000.
+      schema: { type: string, pattern: "^[0-9]+(,[0-9]+)*$" }
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or wrong session token
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Not allowed (for example, the store is read-only)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: Well-formed but invalid (operations, geometry, names)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
   schemas:
+    Error:
+      type: object
+      required: [detail]
+      properties:
+        detail: {}
+
+    ObjectId:
+      type: integer
+      minimum: 0
+      maximum: 9007199254740991
+
     Info:
       type: object
       required: [api_version, capabilities, schemas]
       properties:
-        api_version:
-          type: string
+        api_version: { type: string, examples: ["1.0.0"] }
         capabilities:
+          description: |
+            Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
+            annotations, events, edit (present when at least one store has a
+            sidecar). Clients ignore unknown values.
           type: array
-          items:
-            type: string
+          items: { type: string }
         schemas:
+          description: Binary schema name to supported versions.
           type: object
-          description: Binary schema name to list of supported versions
           additionalProperties:
             type: array
-            items:
-              type: string
+            items: { type: string }
+
+    Image:
+      type: object
+      required: [id, width, height, tile_size, levels, channels, mpp, kind]
+      properties:
+        id: { type: string }
+        width: { type: integer, minimum: 1 }
+        height: { type: integer, minimum: 1 }
+        tile_size: { type: integer, minimum: 1 }
+        levels:
+          description: Level 0 first; level l is downsampled by exactly 2^l.
+          type: array
+          items:
+            type: object
+            required: [width, height, downsample]
+            properties:
+              width: { type: integer, minimum: 1 }
+              height: { type: integer, minimum: 1 }
+              downsample: { type: integer, minimum: 1 }
+        channels:
+          type: array
+          items: { type: string }
+        mpp: { type: [number, "null"], description: "Microns per level-0 pixel." }
+        kind: { type: string, description: "zarr or synthetic." }
+
+    Store:
+      type: object
+      required: [id, name, image_width, image_height, mpp, editable, revision]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        image_width: { type: [integer, "null"] }
+        image_height: { type: [integer, "null"] }
+        mpp: { type: [number, "null"] }
+        editable: { type: boolean, description: "Has a sidecar." }
+        revision: { type: integer, minimum: 0, description: "Sidecar revision; 0 without one." }
+
+    Group:
+      type: object
+      required: [id, name, index]
+      properties:
+        id: { type: integer, description: "Group id used in edit operations." }
+        name: { type: string }
+        index: { type: integer, minimum: 0, description: "Value in binary `group` columns." }
+
+    Layer:
+      type: object
+      required: [id, store_id, name, editable, forked_from, groups, counts, polygon_max_level, revision]
+      properties:
+        id: { type: string }
+        store_id: { type: string }
+        name: { type: string }
+        editable: { type: boolean }
+        forked_from: { type: [string, "null"], description: "Source layer id of a fork." }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/Group" }
+        counts:
+          description: Objects per geometry type (point, pointset, polyline, polygon, circle).
+          type: object
+          additionalProperties: { type: integer, minimum: 0 }
+        polygon_max_level:
+          type: integer
+          minimum: 0
+          description: Highest tile level returning polygons; centroids above.
+        revision: { type: integer, minimum: 0 }
+
+    Geometry:
+      description: GeoJSON geometry in level-0 px. Edits accept Point, LineString, Polygon.
+      type: object
+      required: [type, coordinates]
+      properties:
+        type: { type: string, enum: [Point, MultiPoint, LineString, MultiLineString, Polygon, MultiPolygon] }
+        coordinates: { type: array }
+
+    Feature:
+      type: object
+      required: [type, id, geometry, properties]
+      properties:
+        type: { const: Feature }
+        id: { $ref: "#/components/schemas/ObjectId" }
+        geometry: { $ref: "#/components/schemas/Geometry" }
+        properties:
+          type: object
+          required: [object_id, type, name, group_id, group]
+          properties:
+            object_id: { $ref: "#/components/schemas/ObjectId" }
+            type: { type: string }
+            name: { type: [string, "null"] }
+            group_id: { type: integer }
+            group: { type: integer, minimum: 0 }
+            radius: { type: number, description: "Circles: radius in level-0 px (geometry is the centre)." }
+
+    FeatureCollection:
+      type: object
+      required: [type, layer_id, revision, features]
+      properties:
+        type: { const: FeatureCollection }
+        layer_id: { type: string }
+        revision: { type: integer, minimum: 0 }
+        features:
+          type: array
+          items: { $ref: "#/components/schemas/Feature" }
+
+    ObjectInfo:
+      type: object
+      required: [object_id, type, name, group_id, group, values]
+      properties:
+        object_id: { $ref: "#/components/schemas/ObjectId" }
+        type: { type: string }
+        name: { type: [string, "null"] }
+        group_id: { type: integer }
+        group: { type: integer, minimum: 0 }
+        values:
+          description: Sparse scalar attributes present on the object.
+          type: object
+          additionalProperties: { type: number }
+
+    Op:
+      oneOf:
+        - type: object
+          required: [op, group_id, geometry]
+          properties:
+            op: { const: create }
+            group_id: { type: integer }
+            geometry: { $ref: "#/components/schemas/Geometry" }
+            name: { type: [string, "null"] }
+            values:
+              type: object
+              additionalProperties: { type: [number, "null"] }
+            object_id:
+              description: Only when replaying the inverse of a delete.
+              $ref: "#/components/schemas/ObjectId"
+        - type: object
+          required: [op, object_id, geometry]
+          properties:
+            op: { const: update_geometry }
+            object_id: { $ref: "#/components/schemas/ObjectId" }
+            geometry: { $ref: "#/components/schemas/Geometry" }
+        - type: object
+          required: [op, object_id, values]
+          properties:
+            op: { const: update_attributes }
+            object_id: { $ref: "#/components/schemas/ObjectId" }
+            values:
+              description: Attribute name to value; null removes it.
+              type: object
+              additionalProperties: { type: [number, "null"] }
+        - type: object
+          required: [op, object_id]
+          properties:
+            op: { const: delete }
+            object_id: { $ref: "#/components/schemas/ObjectId" }
+        - type: object
+          required: [op, object_id, group_id]
+          properties:
+            op: { const: move }
+            object_id: { $ref: "#/components/schemas/ObjectId" }
+            group_id: { type: integer, description: "Target group in the same layer." }
+
+    CommitRequest:
+      type: object
+      required: [base_revision, ops]
+      properties:
+        base_revision: { type: integer, minimum: 0 }
+        ops:
+          type: array
+          items: { $ref: "#/components/schemas/Op" }
+        client: { type: [string, "null"], description: "Free-form client label, echoed in events and the log." }
+
+    LogEntry:
+      type: object
+      required: [revision, ts, client, ops, inverse]
+      properties:
+        revision: { type: integer, minimum: 1 }
+        ts: { type: number, description: "Unix time of the commit." }
+        client: { type: [string, "null"] }
+        ops:
+          description: |
+            The batch as committed. Structural entries (fork_layer,
+            create_layer) also appear here; their inverse is empty.
+          type: array
+          items: { type: object }
+        inverse:
+          type: array
+          items: { $ref: "#/components/schemas/Op" }

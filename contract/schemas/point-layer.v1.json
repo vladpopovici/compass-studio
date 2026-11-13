@@ -1,0 +1,12 @@
+{
+  "schema": "point-layer",
+  "version": "1",
+  "description": "All point objects of a layer. One Arrow IPC stream, one record batch.",
+  "fields": [
+    {"name": "object_id", "type": "int64", "description": "Object id, 0 <= id < 2^53."},
+    {"name": "x", "type": "float32", "description": "Level-0 px."},
+    {"name": "y", "type": "float32", "description": "Level-0 px."},
+    {"name": "group", "type": "uint16", "description": "Group index within the layer (Layer.groups[].index)."}
+  ],
+  "metadata": ["schema", "version", "layer_id", "revision"]
+}

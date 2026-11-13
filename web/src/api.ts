@@ -1,11 +1,12 @@
-// Minimal client for the draft API. The token comes from the URL fragment
-// (#token=...), which the browser never sends to the server.
+// Minimal client for contract v1 (types generated from contract/openapi.yaml
+// by `pnpm gen:api`). The token comes from the URL fragment (#token=...),
+// which the browser never sends to the server.
 
-export interface LevelInfo { width: number; height: number; downsample: number }
-export interface ImageInfo {
-  id: string; width: number; height: number; tile_size: number;
-  levels: LevelInfo[]; channels: string[]; mpp: number | null; kind: string;
-}
+import type { components } from "./contract/v1";
+
+export type Schemas = components["schemas"];
+export type ImageInfo = Schemas["Image"];
+export type LayerInfo = Schemas["Layer"];
 
 const token = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
 export const authHeaders = { Authorization: `Bearer ${token}` };
@@ -23,7 +24,7 @@ export async function getBlob(path: string, signal?: AbortSignal): Promise<Blob>
 }
 
 export async function postResults(name: string, data: unknown): Promise<string> {
-  const r = await fetch(`api/v1/spike/results/${name}`, {
+  const r = await fetch(`api/spike/results/${name}`, {
     method: "POST", headers: { ...authHeaders, "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });

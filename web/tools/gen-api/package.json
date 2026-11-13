@@ -1,0 +1,13 @@
+{
+  "name": "gen-api",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Generates web/src/contract/v1.d.ts from contract/openapi.yaml. Own package because openapi-typescript needs the TypeScript 5 compiler API (TypeScript 7 has none).",
+  "scripts": {
+    "gen": "openapi-typescript ../../../contract/openapi.yaml -o ../../src/contract/v1.d.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

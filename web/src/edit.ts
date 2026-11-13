@@ -1,14 +1,16 @@
 // bench=edit (S5): editable-layers on an orthographic canvas, with the 1M-cell
 // bulk layer (and 200 large regions) resident behind it.
 //
-// URL: /?bench=edit[&set=full]#token=...   (server: --spike-files and --sidecar,
-//      the sidecar holding forks of the cells and regions layers of the same store)
+// URL: /?bench=edit[&set=full][&store=synth]#token=...
+//      server: --spike-files (the Arrow bulk) and --annotations synth=<the same
+//      store>; the cells and regions layers are forked through the v1 API on
+//      first use (POST /layers/{id}/fork), keeping their object ids.
 //
 // Flow per object (D8): pick it in the bulk layer -> check out (GET
-// /edit/objects) -> hide it in the bulk layer by a GPU value filter (only the
+// /layers/{edit layer}/features) -> hide it in the bulk layer by a GPU value filter (only the
 // object's vertex range of the filter buffer is rewritten) -> edit it in an
 // EditableGeoJsonLayer (ModifyMode) -> drag one vertex with synthetic pointer
-// events -> commit (POST /edit/commit, update_geometry) -> show the committed
+// events -> commit (POST /stores/{store}/commit, update_geometry) -> show the committed
 // geometry in an overlay layer. Then draw a new polygon (DrawPolygonMode) and
 // commit it as a create.
 //
@@ -21,11 +23,12 @@ import { DataFilterExtension } from "@deck.gl/extensions";
 import { GeoJsonLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { DrawPolygonMode, EditableGeoJsonLayer, ModifyMode } from "@deck.gl-community/editable-layers";
 import { buildPolygons, fetchTable, PALETTE, type Meta, type Part } from "./annot";
-import { authHeaders, postResults } from "./api";
+import { authHeaders, postResults, type LayerInfo } from "./api";
 import { environment, nextFrame, percentiles } from "./env";
 
 const params = new URLSearchParams(location.search);
 const SET = params.get("set") ?? "full";
+const STORE = params.get("store") ?? "synth";
 
 type FC = { type: "FeatureCollection"; features: Feature[]; revision?: number };
 type Feature = { type: "Feature"; id?: number; geometry: { type: string; coordinates: number[][][] };
@@ -137,7 +140,22 @@ export async function runEdit(hud: HTMLElement) {
   const setView = (x: number, y: number, z: number) =>
     renderedAfter(() => { viewState = { target: [x, y, 0], zoom: z }; deck.setProps({ viewState }); });
 
-  const rev0 = (await api<{ revision: number }>("edit/revision")).body.revision;
+  // editable forks of the cells and regions layers (created once, then reused)
+  say("finding or forking editable layers");
+  const layers = (await api<LayerInfo[]>(`layers?store=${STORE}`)).body;
+  const editable: Record<string, LayerInfo> = {};
+  let forkMs: Record<string, number> = {};
+  for (const name of ["cells", "regions"]) {
+    const src = layers.find((l) => !l.editable && l.name === name)!;
+    let e = layers.find((l) => l.forked_from === src.id);
+    if (!e) {
+      const tf = performance.now();
+      e = (await api<LayerInfo>(`layers/${src.id}/fork`, { method: "POST", body: "{}" })).body;
+      forkMs = { ...forkMs, [name]: +(performance.now() - tf).toFixed(0) };
+    }
+    editable[name] = e;
+  }
+  const rev0 = (await api<{ revision: number }>(`stores/${STORE}/revision`)).body.revision;
   let revision = rev0;
   const cases: Record<string, unknown>[] = [];
 
@@ -165,7 +183,7 @@ export async function runEdit(hud: HTMLElement) {
 
     // check out
     t0 = performance.now();
-    const fc = await api<FC>(`edit/objects?ids=${oid}`);
+    const fc = await api<FC>(`layers/${editable[p.parent].id}/features?ids=${oid}`);
     const tFetch = performance.now() - t0;
     revision = fc.body.revision ?? revision;
     setHidden(oid, true);
@@ -206,9 +224,9 @@ export async function runEdit(hud: HTMLElement) {
 
     // commit
     t0 = performance.now();
-    const res = await api<{ revision: number; detail?: unknown }>("edit/commit", {
+    const res = await api<{ revision: number; detail?: unknown }>(`stores/${STORE}/commit`, {
       method: "POST", body: JSON.stringify({ base_revision: revision, client: "s5",
-        ops: [{ op: "update_geometry", object_id: oid, coords: editData.features[0].geometry.coordinates }] }) });
+        ops: [{ op: "update_geometry", object_id: oid, geometry: editData.features[0].geometry }] }) });
     const tPost = performance.now() - t0;
     if (res.status === 200) revision = res.body.revision;
     committed.push(editData.features[0]);
@@ -244,7 +262,7 @@ export async function runEdit(hud: HTMLElement) {
   for (const [, oid] of regions.slice(0, 5)) await editObject(oid, "region");
 
   // draw a new polygon (8 clicks + click on the first vertex) and commit it
-  const cellGroup = (await api<FC>(`edit/objects?ids=${cellParts[0].objectIds[0]}`)).body.features[0].properties.group_id;
+  const cellGroup = editable.cells.groups[0].id;
   await setView(W / 2, H / 2, 2);
   editData = { type: "FeatureCollection", features: [] }; editMode = DrawPolygonMode; selected = [];
   await renderedAfter(setLayers);
@@ -266,9 +284,9 @@ export async function runEdit(hud: HTMLElement) {
   let draw: Record<string, unknown> = { features: editData.features.length, last_edit_type: lastEdit, draw_ms: +drawMs.toFixed(1) };
   if (drawn) {
     t0 = performance.now();
-    const res = await api<{ revision: number; created: number[] }>("edit/commit", {
+    const res = await api<{ revision: number; created: number[] }>(`stores/${STORE}/commit`, {
       method: "POST", body: JSON.stringify({ base_revision: revision, client: "s5",
-        ops: [{ op: "create", group_id: cellGroup, coords: drawn.geometry.coordinates }] }) });
+        ops: [{ op: "create", group_id: cellGroup, geometry: drawn.geometry }] }) });
     committed.push(drawn);
     editData = { type: "FeatureCollection", features: [] };
     await renderedAfter(setLayers);
@@ -278,12 +296,12 @@ export async function runEdit(hud: HTMLElement) {
   }
 
   // stale commit must be refused
-  const stale = await api<{ current_revision: number }>("edit/commit", { method: "POST",
+  const stale = await api<{ current_revision: number }>(`stores/${STORE}/commit`, { method: "POST",
     body: JSON.stringify({ base_revision: rev0, ops: [] }) });
 
   const pick = (k: string) => cases.filter((c) => c.kind === k);
   const result = {
-    spike: "S5", bench: "edit", set: SET, first_frame_ms: +firstFrame.toFixed(1),
+    spike: "S5", bench: "edit", set: SET, api: "v1", fork_ms: forkMs, first_frame_ms: +firstFrame.toFixed(1),
     bulk: { cells: cellParts.reduce((a, p) => a + p.count, 0), parts: parts.length },
     summary: Object.fromEntries(["cell", "region"].map((k) => [k, {
       checkout_ms: percentiles(pick(k).map((c) => c.checkout_ms as number)),

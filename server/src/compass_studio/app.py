@@ -1,4 +1,4 @@
-"""HTTP server (draft; the contract is not frozen until the spikes are done).
+"""HTTP server implementing contract v1 (``contract/openapi.yaml``).
 
 Security (D10): binds to 127.0.0.1 unless told otherwise, requires a
 per-session bearer token on ``/api``, checks Host and Origin, no CORS.
@@ -8,6 +8,14 @@ threads, one per available CPU by default: against Starlette's default
 40-thread pool it gave about 15 % more throughput and kept server-side read
 and encode times flat under load (S1, 2026-11-13). ``tile_threads=0``
 restores Starlette's pool for comparison.
+
+Annotation stores are served together with their sidecar (one sidecar per
+store, D8). Layer ids on the wire are strings: ``{store}:{layer}`` for the
+read-only store and ``{store}:edit:{layer}`` for sidecar layers. Edits run on
+one thread per sidecar. A background thread polls each sidecar's
+``PRAGMA data_version`` (S6) and publishes revision events (``/events``).
+
+Spike-only endpoints live under ``/api/spike`` and are not part of v1.
 """
 
 import asyncio
@@ -16,21 +24,30 @@ import json
 import os
 import re
 import secrets
+import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
 from .annot.sidecar import Conflict, Sidecar
+from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, POINT_LAYER_VERSION, POLYGON_TILE_VERSION,
+                          AnnotationStore, centroid_tile, encode_ipc, point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "0.0.0"
+API_VERSION = "1.0.0"
+TILE = 512
+POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
+ARROW = "application/vnd.apache.arrow.stream"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MEDIA = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
 
@@ -70,28 +87,88 @@ def default_tile_threads() -> int:
     return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 4)
 
 
+@dataclass
+class Dataset:
+    """One annotation store, optionally with its sidecar."""
+    id: str
+    store: AnnotationStore
+    sidecar: Sidecar | None = None
+    view: AnnotationStore | None = None          # read-only connections to the sidecar file
+    edit_pool: ThreadPoolExecutor | None = None
+    cache: dict = field(default_factory=dict)    # (layer id, revision) -> point-layer bytes
+
+    @classmethod
+    def open(cls, store_id: str, store_path: Path, sidecar_path: Path | None) -> "Dataset":
+        ds = cls(store_id, AnnotationStore(store_path))
+        if sidecar_path is not None:
+            ds.sidecar = Sidecar(sidecar_path, source=store_path)
+            ds.view = AnnotationStore(sidecar_path)
+            ds.edit_pool = ThreadPoolExecutor(1, thread_name_prefix=f"edit-{store_id}")
+        return ds
+
+    def revision(self) -> int:
+        return self.view.sync() if self.view else 0
+
+
+def _split_layer(layer_id: str) -> tuple[str, bool, int]:
+    parts = layer_id.split(":")
+    try:
+        if len(parts) == 2:
+            return parts[0], False, int(parts[1])
+        if len(parts) == 3 and parts[1] == "edit":
+            return parts[0], True, int(parts[2])
+    except ValueError:
+        pass
+    raise HTTPException(404, "no such layer")
+
+
 def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
                allowed_origins: set[str], results_dir: Path | None = None,
                web_dir: Path | None = None, spike_files: Path | None = None,
-               tile_threads: int | None = None, sidecar: Sidecar | None = None) -> FastAPI:
-    app = FastAPI(title="CompassStudio", version=API_VERSION, docs_url=None,
-                  redoc_url=None, openapi_url=None)
-    app.add_middleware(Guard, token=token, allowed_hosts=allowed_hosts,
-                       allowed_origins=allowed_origins)
+               tile_threads: int | None = None,
+               datasets: dict[str, Dataset] | None = None) -> FastAPI:
+    datasets = datasets or {}
+    subscribers: set[asyncio.Queue] = set()
+    stop = threading.Event()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        loop = asyncio.get_running_loop()
+        watched = [d for d in datasets.values() if d.sidecar is not None]
+        t = None
+        if watched:
+            t = threading.Thread(target=_watch, args=(watched, loop, subscribers, stop),
+                                 name="revision-watch", daemon=True)
+            t.start()
+        yield
+        stop.set()
+        if t:
+            t.join(2)
+
+    app = FastAPI(title="CompassStudio", version=API_VERSION, docs_url=None, redoc_url=None,
+                  openapi_url=None, lifespan=lifespan)
+    app.add_middleware(Guard, token=token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
     if tile_threads is None:
         tile_threads = default_tile_threads()
     pool = ThreadPoolExecutor(tile_threads, thread_name_prefix="tile") if tile_threads else None
 
+    async def in_pool(fn):
+        if pool is not None:
+            return await asyncio.get_running_loop().run_in_executor(pool, fn)
+        return await run_in_threadpool(fn)
+
+    # -- info -------------------------------------------------------------
+
     @app.get("/api/v1/info")
     def info():
-        caps = ["tiles.jpeg", "tiles.png", "tiles.webp"]
-        if results_dir is not None:
-            caps.append("spike.results")
-        return {"api_version": API_VERSION, "capabilities": caps, "schemas": {}}
+        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "annotations", "events"]
+        if any(d.sidecar for d in datasets.values()):
+            caps.append("edit")
+        return {"api_version": API_VERSION, "capabilities": caps,
+                "schemas": {"point-layer": [POINT_LAYER_VERSION], "polygon-tile": [POLYGON_TILE_VERSION],
+                            "centroid-tile": [CENTROID_TILE_VERSION]}}
 
-    @app.get("/api/v1/images")
-    def list_images():
-        return [{"id": k, **p.info()} for k, p in images.items()]
+    # -- images -----------------------------------------------------------
 
     def _image(image_id: str) -> Pyramid:
         try:
@@ -99,12 +176,16 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         except KeyError:
             raise HTTPException(404, "no such image") from None
 
+    @app.get("/api/v1/images")
+    def list_images():
+        return [{"id": k, **p.info()} for k, p in images.items()]
+
     @app.get("/api/v1/images/{image_id}")
     def image_info(image_id: str):
         return {"id": image_id, **_image(image_id).info()}
 
     @app.get("/api/v1/images/{image_id}/tiles/{level}/{col}/{row}.{fmt}")
-    async def tile(image_id: str, level: int, col: int, row: int, fmt: str, q: int = 90):
+    async def image_tile(image_id: str, level: int, col: int, row: int, fmt: str, q: int = 90):
         p = _image(image_id)
         if fmt not in _MEDIA or not 1 <= q <= 100:
             raise HTTPException(400, "format")
@@ -117,53 +198,247 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
             return body, t1 - t0, time.perf_counter() - t1
 
         try:
-            if pool is not None:
-                body, tr, te = await asyncio.get_running_loop().run_in_executor(pool, work)
-            else:
-                body, tr, te = await run_in_threadpool(work)
+            body, tr, te = await in_pool(work)
         except IndexError:
             raise HTTPException(404, "no such tile") from None
         return Response(body, media_type=_MEDIA[fmt],
                         headers={"Cache-Control": "private, max-age=3600",
                                  "Server-Timing": f"read;dur={tr * 1e3:.2f}, encode;dur={te * 1e3:.2f}"})
 
-    if sidecar is not None:
-        # Draft edit API (D8, spike S5). One sidecar per server; writes are
-        # serialised by SQLite (BEGIN IMMEDIATE) and checked against
-        # base_revision.
-        edit_pool = ThreadPoolExecutor(1, thread_name_prefix="edit")
+    # -- stores and layers ------------------------------------------------
 
-        async def in_edit_thread(fn):
-            return await asyncio.get_running_loop().run_in_executor(edit_pool, fn)
+    def _dataset(store_id: str) -> Dataset:
+        try:
+            return datasets[store_id]
+        except KeyError:
+            raise HTTPException(404, "no such store") from None
 
-        @app.get("/api/v1/edit/revision")
-        async def edit_revision():
-            return {"revision": await in_edit_thread(sidecar.revision)}
+    def _resolve(layer_id: str) -> tuple[Dataset, AnnotationStore, int, bool]:
+        sid, editable, lid = _split_layer(layer_id)
+        ds = _dataset(sid)
+        view = ds.view if editable else ds.store
+        if view is None:
+            raise HTTPException(404, "no such layer")
+        if editable:
+            view.sync()
+        if lid not in view.layers:
+            raise HTTPException(404, "no such layer")
+        return ds, view, lid, editable
 
-        @app.get("/api/v1/edit/objects")
-        async def edit_objects(ids: str):
+    def _store_info(ds: Dataset) -> dict:
+        m = ds.store.meta
+        return {"id": ds.id, "name": m.get("name") or ds.id,
+                "image_width": _int(m.get("image_width")), "image_height": _int(m.get("image_height")),
+                "mpp": _float(m.get("mpp")), "editable": ds.sidecar is not None, "revision": ds.revision()}
+
+    def _layer_info(ds: Dataset, view: AnnotationStore, lid: int, editable: bool) -> dict:
+        forked = None
+        if editable:
+            row = view._conn.execute("SELECT source_layer_id FROM cs_forks WHERE layer_id = ?", (lid,)).fetchone()
+            forked = f"{ds.id}:{row[0]}" if row else None
+        return {"id": f"{ds.id}:edit:{lid}" if editable else f"{ds.id}:{lid}", "store_id": ds.id,
+                "name": view.layers[lid], "editable": editable, "forked_from": forked,
+                "groups": [{"id": g.id, "name": g.name, "index": g.index} for g in view.groups[lid]],
+                "counts": view.counts(lid), "polygon_max_level": POLYGON_MAX_LEVEL,
+                "revision": ds.revision() if editable else 0}
+
+    @app.get("/api/v1/stores")
+    def list_stores():
+        return [_store_info(d) for d in datasets.values()]
+
+    @app.get("/api/v1/stores/{store_id}")
+    def store_info(store_id: str):
+        return _store_info(_dataset(store_id))
+
+    @app.get("/api/v1/stores/{store_id}/attributes")
+    async def store_attributes(store_id: str):
+        ds = _dataset(store_id)
+
+        def work():
+            names = ds.store.attribute_names()
+            if ds.view:
+                names += [n for n in ds.view.attribute_names() if n not in names]
+            return {"store_id": store_id, "attributes": names}
+        return await in_pool(work)
+
+    @app.get("/api/v1/layers")
+    async def list_layers(store: str | None = None):
+        chosen = [_dataset(store)] if store else list(datasets.values())
+
+        def work():
+            out = []
+            for ds in chosen:
+                out += [_layer_info(ds, ds.store, lid, False) for lid in ds.store.layers]
+                if ds.view:
+                    ds.view.sync()
+                    out += [_layer_info(ds, ds.view, lid, True) for lid in ds.view.layers]
+            return out
+        return await in_pool(work)
+
+    @app.get("/api/v1/layers/{layer_id}")
+    async def layer_info(layer_id: str):
+        ds, view, lid, editable = _resolve(layer_id)
+        return await in_pool(lambda: _layer_info(ds, view, lid, editable))
+
+    @app.get("/api/v1/layers/{layer_id}/points")
+    async def layer_points(layer_id: str):
+        ds, view, lid, editable = _resolve(layer_id)
+        rev = ds.revision() if editable else 0
+
+        def work():
+            key = (layer_id, rev)
+            body = ds.cache.get(key)
+            if body is None:
+                ids, gids, xy = view.points(lid)
+                body = encode_ipc(point_layer(ids, view.group_index(lid, gids), xy,
+                                              layer_id=layer_id, revision=rev))
+                for k in [k for k in ds.cache if k[0] == layer_id]:
+                    del ds.cache[k]
+                ds.cache[key] = body
+            return body
+        body = await in_pool(work)
+        return Response(body, media_type=ARROW, headers={"ETag": f'"{layer_id}@{rev}"',
+                                                         "Cache-Control": "private, no-cache"})
+
+    @app.get("/api/v1/layers/{layer_id}/tiles/{level}/{col}/{row}")
+    async def layer_tile(layer_id: str, level: int, col: int, row: int):
+        ds, view, lid, editable = _resolve(layer_id)
+        if not 0 <= level <= 30 or col < 0 or row < 0:
+            raise HTTPException(404, "no such tile")
+        side = TILE * 2 ** level
+        w, h = _int(ds.store.meta.get("image_width")), _int(ds.store.meta.get("image_height"))
+        if (w and col * side >= w) or (h and row * side >= h):
+            raise HTTPException(404, "no such tile")
+        bbox = (col * side, row * side, (col + 1) * side, (row + 1) * side)
+        rev = ds.revision() if editable else 0
+        meta = dict(layer_id=layer_id, revision=rev, level=level, col=col, row=row)
+
+        def work():
+            if level <= POLYGON_MAX_LEVEL:
+                b = view.polygons(lid, bbox)
+                return encode_ipc(polygon_tile(b, view.group_index(lid, b.group_ids), **meta))
+            ids, gids, xy = view.centroids(lid, bbox)
+            return encode_ipc(centroid_tile(ids, view.group_index(lid, gids), xy, **meta))
+        body = await in_pool(work)
+        cache = "private, no-cache" if editable else "private, max-age=3600"
+        return Response(body, media_type=ARROW, headers={"ETag": f'"{layer_id}@{rev}"', "Cache-Control": cache})
+
+    def _ids(ids: str) -> list[int]:
+        try:
+            out = [int(x) for x in ids.split(",") if x]
+        except ValueError:
+            raise HTTPException(400, "ids must be integers") from None
+        if not 0 < len(out) <= 1000 or any(not 0 <= i < ID_LIMIT for i in out):
+            raise HTTPException(400, "1 to 1000 ids in [0, 2^53)")
+        return out
+
+    @app.get("/api/v1/layers/{layer_id}/features")
+    async def layer_features(layer_id: str, ids: str):
+        ds, view, lid, editable = _resolve(layer_id)
+        oids = _ids(ids)
+        rev = ds.revision() if editable else 0
+        feats = await in_pool(lambda: view.features(lid, oids))
+        return {"type": "FeatureCollection", "layer_id": layer_id, "revision": rev, "features": feats}
+
+    @app.get("/api/v1/layers/{layer_id}/objects")
+    async def layer_objects(layer_id: str, ids: str):
+        ds, view, lid, editable = _resolve(layer_id)
+        oids = _ids(ids)
+        objs = await in_pool(lambda: view.objects(lid, oids))
+        return {"layer_id": layer_id, "objects": objs}
+
+    # -- editing ----------------------------------------------------------
+
+    def _editable(store_id: str) -> Dataset:
+        ds = _dataset(store_id)
+        if ds.sidecar is None:
+            raise HTTPException(403, "store is not editable")
+        return ds
+
+    async def _edit(ds: Dataset, fn):
+        return await asyncio.get_running_loop().run_in_executor(ds.edit_pool, fn)
+
+    @app.get("/api/v1/stores/{store_id}/revision")
+    async def store_revision(store_id: str):
+        ds = _editable(store_id)
+        return {"store_id": store_id, "revision": await _edit(ds, ds.sidecar.revision)}
+
+    @app.get("/api/v1/stores/{store_id}/log")
+    async def store_log(store_id: str, since: int = 0, limit: int = 100):
+        ds = _editable(store_id)
+        if not 1 <= limit <= 1000:
+            raise HTTPException(400, "limit must be 1 to 1000")
+        return {"store_id": store_id, "entries": await _edit(ds, lambda: ds.sidecar.log(since, limit))}
+
+    @app.post("/api/v1/stores/{store_id}/commit")
+    async def store_commit(store_id: str, request: Request):
+        ds = _editable(store_id)
+        body = await _json(request)
+        try:
+            base, ops = int(body["base_revision"]), body["ops"]
+            if not isinstance(ops, list):
+                raise TypeError("ops must be a list")
+            c = await _edit(ds, lambda: ds.sidecar.apply(base, ops, client=body.get("client")))
+        except Conflict as e:
+            return JSONResponse({"detail": "conflict", "current_revision": e.current}, status_code=409)
+        except (KeyError, ValueError, TypeError) as e:
+            return JSONResponse({"detail": f"invalid operations: {e}"}, status_code=422)
+        return {"store_id": store_id, "revision": c.revision, "created": c.object_ids}
+
+    @app.post("/api/v1/stores/{store_id}/layers", status_code=201)
+    async def create_layer(store_id: str, request: Request):
+        ds = _editable(store_id)
+        body = await _json(request)
+        name, groups = body.get("name"), body.get("groups")
+        if not isinstance(name, str) or not name or not isinstance(groups, list) or \
+                not all(isinstance(g, str) and g for g in groups) or len(set(groups)) != len(groups):
+            return JSONResponse({"detail": "name and a list of distinct group names required"}, status_code=422)
+        lid, _ = await _edit(ds, lambda: ds.sidecar.create_layer(name, groups))
+        ds.view.sync()
+        return _layer_info(ds, ds.view, lid, True)
+
+    @app.post("/api/v1/layers/{layer_id}/fork", status_code=201)
+    async def fork_layer(layer_id: str, request: Request):
+        ds, view, lid, editable = _resolve(layer_id)
+        if editable:
+            raise HTTPException(400, "only store layers can be forked")
+        if ds.sidecar is None:
+            raise HTTPException(403, "store is not editable")
+        body = await _json(request, allow_empty=True)
+        name = body.get("name")
+        if name is not None and (not isinstance(name, str) or not name):
+            return JSONResponse({"detail": "name must be a non-empty string"}, status_code=422)
+        new = await _edit(ds, lambda: ds.sidecar.fork_layer(ds.store.path, lid, name))
+        ds.view.sync()
+        return _layer_info(ds, ds.view, new, True)
+
+    # -- events -----------------------------------------------------------
+
+    @app.get("/api/v1/events")
+    async def events(request: Request):
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        subscribers.add(q)
+        hello = {"api_version": API_VERSION,
+                 "revisions": {d.id: d.revision() for d in datasets.values() if d.sidecar}}
+
+        async def stream():
             try:
-                oids = [int(x) for x in ids.split(",") if x]
-            except ValueError:
-                raise HTTPException(400, "ids") from None
-            if not 0 < len(oids) <= 1000:
-                raise HTTPException(400, "1 to 1000 ids")
-            return await in_edit_thread(lambda: sidecar.features(oids))
+                yield f"event: hello\ndata: {json.dumps(hello)}\n\n"
+                while not await request.is_disconnected():
+                    try:
+                        ev = await asyncio.wait_for(q.get(), timeout=15)
+                        yield f"event: revision\ndata: {json.dumps(ev)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keep-alive\n\n"
+            finally:
+                subscribers.discard(q)
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
 
-        @app.post("/api/v1/edit/commit")
-        async def edit_commit(request: Request):
-            body = await request.json()
-            try:
-                c = await in_edit_thread(lambda: sidecar.apply(int(body["base_revision"]), body["ops"],
-                                                               client=body.get("client")))
-            except Conflict as e:
-                return JSONResponse({"detail": "conflict", "current_revision": e.current}, status_code=409)
-            except (KeyError, ValueError, TypeError) as e:
-                raise HTTPException(400, str(e)) from None
-            return {"revision": c.revision, "created": c.object_ids}
+    # -- spike-only (not part of v1) --------------------------------------
 
     if results_dir is not None:
-        @app.post("/api/v1/spike/results/{name}")
+        @app.post("/api/spike/results/{name}")
         async def spike_results(name: str, request: Request):
             if not _NAME.match(name):
                 raise HTTPException(400, "name")
@@ -174,7 +449,7 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
             return {"saved": out.name}
 
     if spike_files is not None:  # spike inputs (synthetic Arrow files); token-gated
-        app.mount("/api/v1/spike/files", StaticFiles(directory=spike_files), name="spike-files")
+        app.mount("/api/spike/files", StaticFiles(directory=spike_files), name="spike-files")
 
     if web_dir is not None:  # built client, same origin as the API
         app.mount("/", StaticFiles(directory=web_dir, html=True), name="web")
@@ -182,9 +457,68 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
     return app
 
 
+def _watch(datasets: list[Dataset], loop, subscribers: set, stop: threading.Event, period: float = 0.05):
+    """Poll each sidecar's data_version on private connections; publish
+    revision changes (from this server or from another process, S6)."""
+    conns = {d.id: sqlite3.connect(d.sidecar.path.resolve().as_uri() + "?mode=ro", uri=True)
+             for d in datasets}
+    last = {sid: (c.execute("PRAGMA data_version").fetchone()[0],
+                  c.execute("SELECT revision FROM cs_state WHERE id = 1").fetchone()[0])
+            for sid, c in conns.items()}
+    try:
+        while not stop.wait(period):
+            for sid, c in conns.items():
+                dv = c.execute("PRAGMA data_version").fetchone()[0]
+                if dv == last[sid][0]:
+                    continue
+                rev = c.execute("SELECT revision FROM cs_state WHERE id = 1").fetchone()[0]
+                if rev != last[sid][1]:
+                    client = c.execute("SELECT client FROM cs_oplog WHERE revision = ?", (rev,)).fetchone()
+                    ev = {"store_id": sid, "revision": rev, "client": client[0] if client else None}
+                    for q in list(subscribers):
+                        loop.call_soon_threadsafe(_offer, q, ev)
+                last[sid] = (dv, rev)
+    finally:
+        for c in conns.values():
+            c.close()
+
+
+def _offer(q: asyncio.Queue, ev: dict) -> None:
+    try:
+        q.put_nowait(ev)
+    except asyncio.QueueFull:  # slow client: drop; it can resync from /revision
+        pass
+
+
+async def _json(request: Request, allow_empty: bool = False) -> dict:
+    raw = await request.body()
+    if not raw and allow_empty:
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "body must be JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "body must be a JSON object")
+    return body
+
+
+def _int(v) -> int | None:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _float(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _encode(arr: np.ndarray, fmt: str, q: int) -> bytes:
-    im = Image.fromarray(np.ascontiguousarray(arr[..., :3] if arr.shape[-1] >= 3
-                                              else arr[..., 0]))
+    im = Image.fromarray(np.ascontiguousarray(arr[..., :3] if arr.shape[-1] >= 3 else arr[..., 0]))
     buf = io.BytesIO()
     if fmt == "jpg":
         im.save(buf, "JPEG", quality=q)

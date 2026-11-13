@@ -1,0 +1,13 @@
+{
+  "schema": "polygon-tile",
+  "version": "1",
+  "description": "Polygons of a layer whose bounding box meets a tile. One Arrow IPC stream, one record batch.",
+  "fields": [
+    {"name": "object_id", "type": "int64", "description": "Object id, 0 <= id < 2^53. May repeat across tiles."},
+    {"name": "group", "type": "uint16", "description": "Group index within the layer."},
+    {"name": "coords", "type": "list<float32>", "description": "x, y interleaved, level-0 px; exterior ring then holes; rings not closed (no repeated first vertex)."},
+    {"name": "holes", "type": "list<uint32>", "description": "Vertex index (within this polygon) where each hole ring starts; empty without holes."},
+    {"name": "triangles", "type": "list<uint32>", "description": "Earcut triangle indices into this polygon's vertices, 3 per triangle."}
+  ],
+  "metadata": ["schema", "version", "layer_id", "revision", "level", "col", "row"]
+}

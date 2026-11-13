@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: planning. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done and contract v1 frozen (2026-11-13); next is milestone 3. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -83,7 +83,17 @@ later because the client depends only on the contract (D2).
 - Server-sent events notify the client of changes by other processes.
 - Coordinates are level-0 pixels; mpp is metadata; the UI shows microns.
 - The contract directory (spec, schemas, conformance tests) is a first-class
-  deliverable. It is frozen only after the spikes.
+  deliverable. **v1 frozen 2026-11-13** (`contract/`): within `/api/v1` only
+  backward-compatible additions; binary schemas never change once released
+  (a change is a new schema version). Object ids are integers below 2^53
+  (int64 in Arrow, exact in JSON). Layer ids are opaque strings,
+  `{store}:{layer}` and `{store}:edit:{layer}`. Edits carry GeoJSON
+  geometry; invalid operations or geometry return 422. Server-sent events
+  report revision changes, detected by polling the sidecar's
+  `PRAGMA data_version` (S6), so changes by other processes arrive too.
+  Conformance tests run with the server's test suite; TypeScript types are
+  generated with openapi-typescript (in its own package, `web/tools/gen-api`,
+  because it needs the TypeScript 5 compiler API).
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -149,6 +159,11 @@ milestone 3). Details: `docs/spikes/S2.md`.
   is above level 3. The read path is GIL-bound (4 threads give no speed-up);
   exporting a 5M point layer takes 5.7 s and needs a cache. Details:
   `docs/spikes/S4.md`.
+  Contract v1: polygon tiles use the image tile grid
+  (`/layers/{id}/tiles/{level}/{col}/{row}`), up to `polygon_max_level` = 3;
+  above it, centroid tiles (bbox centres, each object in one tile). A
+  density raster for very low zoom is deferred. Point layers are cached in
+  server memory per revision (5M points: 5.4 s first, 26 ms cached).
 - Label maps: the same tile path as images, as integer textures coloured by a
   palette texture, so class toggling needs no refetch.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
@@ -192,6 +207,11 @@ frozen schema document is needed from the COMPASS side (section 8).
   about 10 ms, readers are not blocked, and racing writers get conflicts,
   not busy errors. Provisional id scheme: forked objects keep their source
   ids, new objects get ids above every id used. Details: `docs/spikes/S6.md`.
+  Decided for v1 (2026-11-13): one sidecar per source store (bound by path
+  in its `meta`); forked objects keep their source ids (forks refuse source
+  ids at or above 2^40); objects created in the sidecar get ids from 2^40.
+  Forking and creating layers advance the revision and appear in the log
+  (empty inverse).
 - **Editing library**: `@deck.gl-community/editable-layers` (successor of
   nebula.gl). Its repository is flagged semi-maintained and it does not support
   deck.gl's WebGPU path, which is acceptable under D5. Verified by S5
@@ -253,7 +273,7 @@ baseline (D5).
 ## 7. Milestones
 
 1. Repository, contract skeleton, sample data and synthetic annotation generator.
-2. Spikes S1 to S6; freeze contract v1.
+2. Spikes S1 to S6; freeze contract v1. Done 2026-11-13.
 3. RGB tile server and pan/zoom viewer.
 4. Label maps with class toggles.
 5. Points: layer view, picking, attribute panel.
@@ -266,14 +286,19 @@ baseline (D5).
 ## 8. Open items
 
 - License.
-- Object id scheme for the sidecar database (namespacing against source ids).
-  Provisional (S6): forked objects keep source ids; breaks if two stores with
-  overlapping ids are forked into one sidecar.
 - Frozen COMPASS annotation-schema document (ideally in the COMPASS repository).
 - Merge-back path from sidecar layers to a COMPASS store.
 - dockview maintenance status; browser Blosc-bitshuffle decode (only relevant if
   D4's rejected option is revisited).
-- Whether and when to move to WebGPU; whether a Rust server is ever needed
-  (only if profiling demands it).
-- Zoomed-out level-of-detail threshold for polygons (D6): not tunable on the
-  workstation GPU; needs a weaker GPU or an object-count rule.
+- Whether and when to move to WebGPU. No full Rust server (reviewed
+  2026-11-13: none of S1 to S6 broke a budget in Python). If stores outgrow
+  the synthetic sizes, a small Rust/PyO3 extension for building polygon
+  tiles and point buffers (the GIL-bound loops of S4); the Arrow output, and
+  so the contract, stays the same. Try a faster ASGI server and HTTP/2
+  first (per-request overhead, the browser's 6-connection limit).
+- Zoomed-out level of detail (D6): v1 switches to centroids above level 3
+  (S4 server cost); whether the GPU needs an earlier switch, and the density
+  raster, are open.
+- Layer object counts (`Layer.counts`) are computed with a full join on
+  first use: 3.3 s for the 6M-object synthetic store. Cache them in the
+  sidecar or compute them in the background.

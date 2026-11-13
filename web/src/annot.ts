@@ -1,5 +1,5 @@
 // bench=annot (S3): 5M points and 1M polygons resident, from the synthetic
-// Arrow files served under /api/v1/spike/files.
+// Arrow files served under /api/spike/files (outside contract v1).
 //
 // URL: /?bench=annot[&set=full][&layers=points,cells,regions][&tess=server|client]
 //                   [&polymode=groups|filter]#token=...
@@ -61,7 +61,7 @@ export interface Part {
 
 export async function fetchTable(name: string): Promise<{ table: Table; bytes: number; ms: number }> {
   const t0 = performance.now();
-  const r = await fetch(`api/v1/spike/files/${name}`, { headers: authHeaders });
+  const r = await fetch(`api/spike/files/${name}`, { headers: authHeaders });
   if (!r.ok) throw new Error(`${name}: ${r.status}`);
   const buf = new Uint8Array(await r.arrayBuffer());
   const table = tableFromIPC(buf);

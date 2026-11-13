@@ -1,0 +1,12 @@
+{
+  "schema": "centroid-tile",
+  "version": "1",
+  "description": "Zoomed-out stand-in for polygons: the centre of each polygon's bounding box, each object in exactly one tile (half-open tile bounds). One Arrow IPC stream, one record batch.",
+  "fields": [
+    {"name": "object_id", "type": "int64", "description": "Object id, 0 <= id < 2^53."},
+    {"name": "x", "type": "float32", "description": "Level-0 px."},
+    {"name": "y", "type": "float32", "description": "Level-0 px."},
+    {"name": "group", "type": "uint16", "description": "Group index within the layer."}
+  ],
+  "metadata": ["schema", "version", "layer_id", "revision", "level", "col", "row"]
+}

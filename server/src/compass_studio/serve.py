@@ -1,4 +1,5 @@
-"""``compass-studio-serve``: serve images (and the built client) locally."""
+"""``compass-studio-serve``: serve images, annotation stores (and the built
+client) locally, implementing contract v1."""
 
 import argparse
 import os
@@ -7,8 +8,7 @@ from pathlib import Path
 
 import uvicorn
 
-from .app import create_app
-from .annot.sidecar import Sidecar
+from .app import Dataset, create_app
 from .imaging.pyramid import SyntheticPyramid, ZarrPyramid
 
 
@@ -16,6 +16,8 @@ def _kv(s: str) -> tuple[str, str]:
     k, sep, v = s.partition("=")
     if not sep or not k:
         raise argparse.ArgumentTypeError("expected ID=VALUE")
+    if not all(ch.isalnum() or ch in "_-." for ch in k):
+        raise argparse.ArgumentTypeError(f"id {k!r}: use letters, digits, '_', '-', '.'")
     return k, v
 
 
@@ -25,6 +27,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="COMPASS .zarr folder to serve (repeatable)")
     ap.add_argument("--synthetic", type=_kv, action="append", default=[], metavar="ID=WxH",
                     help="procedural test pyramid, e.g. synth200k=200000x200000")
+    ap.add_argument("--annotations", type=_kv, action="append", default=[], metavar="ID=PATH",
+                    help="COMPASS annotation store (.ann.sqlite) to serve (repeatable)")
+    ap.add_argument("--sidecar-dir", type=Path,
+                    help="directory for sidecar curation databases, one per store, named "
+                         "<ID>.curation.sqlite (default: next to each store)")
+    ap.add_argument("--read-only", action="store_true", help="no sidecars: annotations cannot be edited")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--allow-other-interfaces", action="store_true",
@@ -35,12 +43,11 @@ def main(argv: list[str] | None = None) -> None:
                     help="image reader: direct shard reader where supported (auto) or zarr-python")
     ap.add_argument("--tile-threads", type=int, default=None,
                     help="tile read/encode threads (default: available CPUs; 0 = Starlette's pool)")
-    ap.add_argument("--sidecar", type=Path, help="sidecar curation database to edit (draft edit API)")
     ap.add_argument("--web", type=Path, help="built client directory to serve at /")
     ap.add_argument("--spike-files", type=Path,
-                    help="serve this directory at /api/v1/spike/files (spike inputs)")
+                    help="serve this directory at /api/spike/files (spike inputs, not part of v1)")
     ap.add_argument("--spike-results", type=Path,
-                    help="enable POST /api/v1/spike/results and write them here")
+                    help="enable POST /api/spike/results and write them here (not part of v1)")
     a = ap.parse_args(argv)
 
     if a.host != "127.0.0.1" and not a.allow_other_interfaces:
@@ -52,17 +59,29 @@ def main(argv: list[str] | None = None) -> None:
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
-    if not images and a.spike_files is None and a.sidecar is None:
-        ap.error("nothing to serve: give --image, --synthetic or --spike-files")
+    datasets = {}
+    for k, v in a.annotations:
+        store = Path(v)
+        sidecar = None
+        if not a.read_only:
+            d = a.sidecar_dir or store.parent
+            d.mkdir(parents=True, exist_ok=True)
+            sidecar = d / f"{k}.curation.sqlite"
+        datasets[k] = Dataset.open(k, store, sidecar)
+    if not images and not datasets and a.spike_files is None:
+        ap.error("nothing to serve: give --image, --synthetic, --annotations or --spike-files")
 
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}
     origins = {f"http://{h}" for h in hosts} | set(a.allow_origin)
     app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files,
-                     a.tile_threads, Sidecar(a.sidecar) if a.sidecar else None)
+                     a.tile_threads, datasets)
 
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():
-        print(f"  {k}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
+        print(f"  image {k}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
               f"fast path {sum(p.fast_levels)}/{len(p.levels)} levels", flush=True)
+    for k, ds in datasets.items():
+        print(f"  annotations {k}: {len(ds.store.layers)} layers"
+              + (f", sidecar {ds.sidecar.path}" if ds.sidecar else ", read-only"), flush=True)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")

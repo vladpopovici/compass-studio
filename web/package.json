@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "build": "pnpm gen:api && tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "gen:api": "pnpm --filter gen-api run gen"
   },
   "dependencies": {
     "@deck.gl-community/editable-layers": "9.4.8",

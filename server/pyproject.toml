@@ -24,7 +24,9 @@ compass-studio-serve = "compass_studio.serve:main"
 [dependency-groups]
 dev = [
     "httpx>=0.27",
+    "jsonschema>=4.23",
     "pytest>=8",
+    "pyyaml>=6",
 ]
 
 [build-system]
@@ -35,7 +37,7 @@ build-backend = "hatchling.build"
 packages = ["src/compass_studio"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "../contract/conformance"]
 
 [tool.uv]
 # Supply-chain hygiene: resolve only releases at least ~two weeks old.

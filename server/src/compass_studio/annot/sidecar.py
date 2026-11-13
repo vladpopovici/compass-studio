@@ -13,8 +13,11 @@ Writes are batches of operations applied atomically against a
 API). Another process committing to the same file is detected cheaply with
 ``PRAGMA data_version``.
 
-Object ids (provisional, open item in the decision log): forked objects keep
-their source ids; new objects get ids above every id used so far.
+Object ids (contract v1, decided 2026-11-13): a sidecar belongs to exactly one
+source store (``cs_source`` in ``meta``). Forked objects keep their source
+ids, which must be below ``NEW_ID_BASE`` (2**40); objects created in the
+sidecar get ids from ``NEW_ID_BASE`` upwards, so they never clash with
+source ids. All ids stay below 2**53 (JSON-safe).
 """
 
 import json
@@ -30,7 +33,8 @@ import shapely.geometry
 
 from .schema import SCHEMA_VERSION, SQLITE_DDL, TYPE_CODE
 
-SIDECAR_VERSION = "0"
+SIDECAR_VERSION = "1"
+NEW_ID_BASE = 2**40
 
 VIEWER_DDL = """
 CREATE TABLE IF NOT EXISTS cs_state (
@@ -54,7 +58,6 @@ CREATE TABLE IF NOT EXISTS cs_forks (
 );
 """
 
-POLYGON = TYPE_CODE["POLYGON"]
 
 
 class Conflict(Exception):
@@ -71,22 +74,32 @@ class Committed:
     object_ids: list[int]  # ids created by this batch, in op order
 
 
-def _geom(op: dict) -> tuple[bytes, tuple[float, float, float, float]]:
-    rings = op["coords"]  # [exterior, *holes], each [[x, y], ...], open or closed
-    g = shapely.Polygon(rings[0], rings[1:])
-    if not g.is_valid:
-        raise ValueError(f"invalid polygon: {shapely.is_valid_reason(g)}")
-    return shapely.to_wkb(g), tuple(shapely.bounds(g))
+_GEOJSON_TYPE = {"Point": TYPE_CODE["POINT"], "LineString": TYPE_CODE["POLYLINE"],
+                 "Polygon": TYPE_CODE["POLYGON"]}
 
 
-def _coords(wkb: bytes) -> list[list[list[float]]]:
-    g = shapely.from_wkb(wkb)
-    return [np.asarray(g.exterior.coords).tolist()] + [np.asarray(r.coords).tolist()
-                                                       for r in g.interiors]
+def _geom(op: dict) -> tuple[int, bytes, tuple[float, float, float, float]]:
+    """GeoJSON ``geometry`` (Point, LineString or Polygon, level-0 px) ->
+    (type_code, WKB, bbox). Invalid geometries are refused."""
+    gj = op["geometry"]
+    code = _GEOJSON_TYPE.get(gj.get("type"))
+    if code is None:
+        raise ValueError(f"unsupported geometry type {gj.get('type')!r}")
+    g = shapely.geometry.shape(gj)
+    if g.is_empty or not g.is_valid:
+        raise ValueError(f"invalid {gj['type']}: {shapely.is_valid_reason(g)}")
+    return code, shapely.to_wkb(g), tuple(shapely.bounds(g))
+
+
+def _geojson(wkb: bytes) -> dict:
+    return shapely.geometry.mapping(shapely.from_wkb(wkb))
 
 
 class Sidecar:
-    def __init__(self, path: str | Path, synchronous: str = "NORMAL", busy_timeout_ms: int = 5000):
+    def __init__(self, path: str | Path, source: str | Path | None = None,
+                 synchronous: str = "NORMAL", busy_timeout_ms: int = 5000):
+        """Open or create a sidecar. ``source``: the COMPASS store it belongs
+        to; recorded on creation and checked on every later open."""
         self.path = Path(path)
         new = not self.path.exists()
         self._conn = sqlite3.connect(self.path.resolve().as_uri(), uri=True, isolation_level=None,
@@ -105,6 +118,13 @@ class Sidecar:
         v = c.execute("SELECT value FROM meta WHERE key = 'cs_sidecar_version'").fetchone()
         if v is None or v[0] != SIDECAR_VERSION:
             raise ValueError(f"not a version {SIDECAR_VERSION} sidecar: {path}")
+        if source is not None:
+            src = str(Path(source).resolve())
+            have = c.execute("SELECT value FROM meta WHERE key = 'cs_source'").fetchone()
+            if have is None:
+                c.execute("INSERT INTO meta(key, value) VALUES ('cs_source', ?)", (src,))
+            elif have[0] != src:
+                raise ValueError(f"sidecar {path} belongs to {have[0]}, not {src}")
 
     def close(self) -> None:
         self._conn.close()
@@ -122,8 +142,12 @@ class Sidecar:
 
     def fork_layer(self, source: str | Path, layer_id: int, name: str | None = None) -> int:
         """Copy one layer (groups, objects, sparse scalars) from a read-only
-        store into a new editable layer. Returns the new layer id."""
+        store into a new editable layer. Returns the new layer id. The source
+        must be the store this sidecar belongs to (if it is bound to one)."""
         source = Path(source)
+        bound = self._conn.execute("SELECT value FROM meta WHERE key = 'cs_source'").fetchone()
+        if bound is not None and bound[0] != str(source.resolve()):
+            raise ValueError(f"this sidecar belongs to {bound[0]}")
         c = self._conn
         c.execute("ATTACH DATABASE ? AS src", (source.resolve().as_uri() + "?mode=ro",))
         try:
@@ -150,6 +174,8 @@ class Sidecar:
             c.execute("INSERT INTO object_scalar_sparse SELECT s.* FROM src.object_scalar_sparse s "
                       "JOIN ids ON ids.id = s.object_id")
             mx = c.execute("SELECT MAX(id) FROM ids").fetchone()[0]
+            if mx is not None and mx >= NEW_ID_BASE:
+                raise ValueError(f"source object id {mx} >= {NEW_ID_BASE}: cannot fork without renumbering")
             if mx is not None:
                 last = int(c.execute("SELECT value FROM meta WHERE key = 'last_object_id'").fetchone()[0])
                 c.execute("UPDATE meta SET value = ? WHERE key = 'last_object_id'", (str(max(last, mx)),))
@@ -157,6 +183,7 @@ class Sidecar:
                       (new_lid, str(source), layer_id, src_version[0] if src_version else None, time.time()))
             c.execute("DROP TABLE temp.gmap")
             c.execute("DROP TABLE temp.ids")
+            self._bump([{"op": "fork_layer", "source_layer_id": layer_id, "layer_id": new_lid}], [], None)
             c.execute("COMMIT")
         except BaseException:
             if c.in_transaction:
@@ -176,6 +203,7 @@ class Sidecar:
             g0 = self._alloc("groups", "group_id", "last_group_id", len(groups))
             c.executemany("INSERT INTO groups(group_id, layer_id, name) VALUES (?, ?, ?)",
                           [(g0 + i, lid, n) for i, n in enumerate(groups)])
+            self._bump([{"op": "create_layer", "layer_id": lid, "name": name, "groups": groups}], [], None)
             c.execute("COMMIT")
         except BaseException:
             c.execute("ROLLBACK")
@@ -186,7 +214,8 @@ class Sidecar:
         c = self._conn
         last = int(c.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()[0])
         mx = c.execute(f"SELECT MAX({column}) FROM {table}").fetchone()[0]
-        start = max(last, -1 if mx is None else int(mx)) + 1
+        floor = NEW_ID_BASE - 1 if table == "objects" else -1
+        start = max(last, -1 if mx is None else int(mx), floor) + 1
         c.execute("UPDATE meta SET value = ? WHERE key = ?", (str(start + n - 1), key))
         return start
 
@@ -195,10 +224,11 @@ class Sidecar:
     def apply(self, base_revision: int, ops: list[dict[str, Any]], client: str | None = None) -> Committed:
         """Apply ``ops`` atomically if ``base_revision`` is current.
 
-        Ops: ``create`` {layer_id?, group_id, coords}, ``update_geometry``
-        {object_id, coords}, ``update_attributes`` {object_id, values:
-        {name: float | None}}, ``delete`` {object_id}, ``move`` {object_id,
-        group_id}. ``coords`` is [exterior, *holes] of [x, y] pairs.
+        Ops (contract v1): ``create`` {group_id, geometry, name?, values?},
+        ``update_geometry`` {object_id, geometry}, ``update_attributes``
+        {object_id, values: {name: float | null}}, ``delete`` {object_id},
+        ``move`` {object_id, group_id}. ``geometry`` is GeoJSON (Point,
+        LineString or Polygon) in level-0 px.
         """
         c = self._conn
         c.execute("BEGIN IMMEDIATE")
@@ -210,15 +240,29 @@ class Sidecar:
             created: list[int] = []
             for op in ops:
                 inverse.append(self._apply_one(op, created))
-            rev = current + 1
-            c.execute("UPDATE cs_state SET revision = ? WHERE id = 1", (rev,))
-            c.execute("INSERT INTO cs_oplog(revision, ts, client, ops, inverse) VALUES (?, ?, ?, ?, ?)",
-                      (rev, time.time(), client, json.dumps(ops), json.dumps(inverse[::-1])))
+            rev = self._bump(ops, inverse[::-1], client)
             c.execute("COMMIT")
             return Committed(rev, created)
         except BaseException:
             c.execute("ROLLBACK")
             raise
+
+    def _bump(self, ops: list[dict], inverse: list[dict], client: str | None) -> int:
+        """Advance the revision and log the batch (inside the caller's transaction).
+        Structural changes (fork_layer, create_layer) log an empty inverse."""
+        c = self._conn
+        rev = self.revision() + 1
+        c.execute("UPDATE cs_state SET revision = ? WHERE id = 1", (rev,))
+        c.execute("INSERT INTO cs_oplog(revision, ts, client, ops, inverse) VALUES (?, ?, ?, ?, ?)",
+                  (rev, time.time(), client, json.dumps(ops), json.dumps(inverse)))
+        return rev
+
+    def log(self, since: int = 0, limit: int = 100) -> list[dict]:
+        """Batches committed after revision ``since``, oldest first."""
+        return [{"revision": r, "ts": ts, "client": cl, "ops": json.loads(o), "inverse": json.loads(i)}
+                for r, ts, cl, o, i in self._conn.execute(
+                    "SELECT revision, ts, client, ops, inverse FROM cs_oplog WHERE revision > ? "
+                    "ORDER BY revision LIMIT ?", (since, limit))]
 
     def inverse_of(self, revision: int) -> list[dict]:
         """Operations that undo the batch committed at ``revision``."""
@@ -248,13 +292,13 @@ class Sidecar:
         kind = op["op"]
         if kind == "create":
             self._editable_group(op["group_id"])
-            wkb, b = _geom(op)
+            code, wkb, b = _geom(op)
             oid = op.get("object_id")  # set when replaying an inverse of delete
             if oid is None:
                 oid = self._alloc("objects", "object_id", "last_object_id", 1)
             c.execute("INSERT INTO objects(object_id, type_code, name, wkb, circle_r, min_x, min_y, "
                       "max_x, max_y) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)",
-                      (oid, POLYGON, op.get("name"), wkb, *b))
+                      (oid, code, op.get("name"), wkb, *b))
             c.execute("INSERT INTO object_groups(object_id, group_id) VALUES (?, ?)", (oid, op["group_id"]))
             if op.get("values"):
                 self._set_values(oid, op["values"])
@@ -263,10 +307,10 @@ class Sidecar:
         if kind == "update_geometry":
             self._object_group(op["object_id"])
             old, = c.execute("SELECT wkb FROM objects WHERE object_id = ?", (op["object_id"],)).fetchone()
-            wkb, b = _geom(op)
-            c.execute("UPDATE objects SET wkb = ?, min_x = ?, min_y = ?, max_x = ?, max_y = ? "
-                      "WHERE object_id = ?", (wkb, *b, op["object_id"]))
-            return {"op": "update_geometry", "object_id": op["object_id"], "coords": _coords(old)}
+            code, wkb, b = _geom(op)
+            c.execute("UPDATE objects SET type_code = ?, wkb = ?, circle_r = NULL, min_x = ?, min_y = ?, "
+                      "max_x = ?, max_y = ? WHERE object_id = ?", (code, wkb, *b, op["object_id"]))
+            return {"op": "update_geometry", "object_id": op["object_id"], "geometry": _geojson(old)}
         if kind == "update_attributes":
             self._object_group(op["object_id"])
             old = self._get_values(op["object_id"], list(op["values"]))
@@ -286,26 +330,8 @@ class Sidecar:
             values = self._get_values(op["object_id"], None)
             c.execute("DELETE FROM objects WHERE object_id = ?", (op["object_id"],))
             return {"op": "create", "object_id": op["object_id"], "group_id": gid, "name": name,
-                    "coords": _coords(wkb), "values": values}
+                    "geometry": _geojson(wkb), "values": values}
         raise ValueError(f"unknown op {kind!r}")
-
-    # -- reads ---------------------------------------------------------------
-
-    def features(self, object_ids: list[int]) -> dict:
-        """GeoJSON FeatureCollection of the given objects (check-out), with the
-        current revision. Coordinates are level-0 pixels."""
-        c = self._conn
-        q = ",".join("?" * len(object_ids))
-        feats = []
-        for oid, wkb, gid, lid in c.execute(
-                f"SELECT o.object_id, o.wkb, MIN(og.group_id), g.layer_id FROM objects o "
-                f"JOIN object_groups og ON og.object_id = o.object_id "
-                f"JOIN groups g ON g.group_id = og.group_id "
-                f"WHERE o.object_id IN ({q}) GROUP BY o.object_id", object_ids):
-            feats.append({"type": "Feature", "id": oid,
-                          "geometry": shapely.geometry.mapping(shapely.from_wkb(wkb)),
-                          "properties": {"object_id": oid, "group_id": gid, "layer_id": lid}})
-        return {"type": "FeatureCollection", "revision": self.revision(), "features": feats}
 
     # -- sparse scalars ------------------------------------------------------
 

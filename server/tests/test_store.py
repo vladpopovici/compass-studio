@@ -27,7 +27,8 @@ def store(tmp_path_factory):
 def test_layers_and_points(store):
     assert store.layers == {1: "points", 2: "cells", 3: "regions"}
     oid, gid, xy = store.points(1)
-    assert len(oid) == 2000 and set(gid) <= set(store.groups[1])
+    assert len(oid) == 2000 and set(gid.tolist()) <= {g.id for g in store.groups[1]}
+    assert oid.dtype == np.int64
     assert (xy >= 0).all() and (xy[:, 0] <= 20_000).all()
 
 
@@ -48,8 +49,10 @@ def test_decoders_agree_and_tile_roundtrip(store):
     a, b = decode_polygons(rows, "direct"), decode_polygons(rows, "shapely")
     np.testing.assert_array_equal(a.starts, b.starts)
     np.testing.assert_array_equal(a.xy, b.xy)
-    tile = pa.ipc.open_stream(encode_ipc(polygon_tile(a))).read_all()
+    tile = pa.ipc.open_stream(encode_ipc(polygon_tile(a, store.group_index(2, a.group_ids)))).read_all()
     assert tile.num_rows == len(rows)
+    assert tile.schema.metadata[b"schema"] == b"polygon-tile" and tile.schema.metadata[b"version"] == b"1"
+    assert set(tile["group"].to_pylist()) <= set(range(len(store.groups[2])))
     ring = np.asarray(tile["coords"][7].as_py()).reshape(-1, 2)
     tri = np.asarray(tile["triangles"][7].as_py()).reshape(-1, 3)
     area = sum(shapely.Polygon(ring[t]).area for t in tri)
@@ -74,7 +77,8 @@ def test_holes(tmp_path):
     for dec in ("direct", "shapely"):
         b = s.polygons(1, (0, 0, 10, 10), decoder=dec)
         assert b.starts.tolist() == [0, 8] and b.hole_starts[0].tolist() == [4]
-        t = pa.ipc.open_stream(encode_ipc(polygon_tile(b))).read_all()
+        t = pa.ipc.open_stream(encode_ipc(polygon_tile(b, s.group_index(1, b.group_ids)))).read_all()
+        assert t["holes"][0].as_py() == [4]
         xy = np.asarray(t["coords"][0].as_py()).reshape(-1, 2)
         tri = np.asarray(t["triangles"][0].as_py()).reshape(-1, 3)
         assert sum(shapely.Polygon(xy[k]).area for k in tri) == pytest.approx(poly.area)
@@ -89,3 +93,17 @@ def test_refuses_unknown_schema(tmp_path):
     c.close()
     with pytest.raises(SchemaError):
         AnnotationStore(p)
+
+
+def test_features_objects_centroids(store):
+    rows = store.query_rows(2, (0, 0, 20_000, 10_000))
+    ids = [r[0] for r in rows[:5]]
+    feats = store.features(2, ids)
+    assert {f["id"] for f in feats} == set(ids) and feats[0]["geometry"]["type"] == "Polygon"
+    objs = store.objects(2, ids)
+    assert {o["object_id"] for o in objs} == set(ids) and all(isinstance(o["values"], dict) for o in objs)
+    assert store.counts(2) == {"polygon": 3000}
+    # centroids: each object in exactly one tile of a 2x1 split
+    a = store.centroids(2, (0, 0, 10_000, 10_000))[0]
+    b = store.centroids(2, (10_000, 0, 20_000, 10_000))[0]
+    assert not set(a.tolist()) & set(b.tolist()) and len(a) + len(b) == 3000
