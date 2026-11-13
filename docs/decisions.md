@@ -294,8 +294,13 @@ baseline (D5).
   2026-11-13: none of S1 to S6 broke a budget in Python). If stores outgrow
   the synthetic sizes, a small Rust/PyO3 extension for building polygon
   tiles and point buffers (the GIL-bound loops of S4); the Arrow output, and
-  so the contract, stays the same. Try a faster ASGI server and HTTP/2
-  first (per-request overhead, the browser's 6-connection limit).
+  so the contract, stays the same. Faster ASGI servers measured 2026-11-13
+  (S1 tile set, 4 CPUs): uvicorn with httptools + uvloop and Granian 2.8 both
+  gave about 1,100 to 1,150 tiles/s against 1,030 for uvicorn with h11, i.e.
+  8 to 12 %, close to run-to-run noise; the overhead is in the Python app,
+  not the HTTP parser. Granian is not worth a switch. HTTP/2 is ruled out
+  for now: browsers only use it over TLS, which on 127.0.0.1 means
+  self-signed certificates or a locally installed CA.
 - Zoomed-out level of detail (D6): v1 switches to centroids above level 3
   (S4 server cost); whether the GPU needs an earlier switch, and the density
   raster, are open.
