@@ -1,13 +1,20 @@
-// Application: image picker, pan/zoom viewer, label maps, status bar.
+// Application: image picker, pan/zoom viewer, sidebar (annotation layers,
+// label maps), inspector for selected points, status bar.
 // URL: /?image=<id>&x=&y=&z=#token=<token>  (position kept on reload; the
 // token stays in the fragment, which the browser never sends).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJSON, type ImageInfo } from "@/api";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_STYLE, type LabelClass, type LabelStyle } from "@/viewer/labels";
+import type { PointPick } from "@/viewer/points";
 import type { View, Viewer } from "@/viewer/viewer";
+import { useAnnotations, useObjects } from "./annotations";
+import { Inspector, objectKey } from "./Inspector";
 import { LabelPanel, type LabelMapState } from "./LabelPanel";
+import { LayersPanel } from "./LayersPanel";
+import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { Toolbar } from "./Toolbar";
 import { ViewerPane } from "./ViewerPane";
@@ -22,6 +29,7 @@ function initialView() {
 
 function writeUrl(image: string, v: View | null) {
   const q = new URLSearchParams({ image });
+  if (new URLSearchParams(location.search).has("debug")) q.set("debug", "");
   if (v) {
     q.set("x", v.x.toFixed(0));
     q.set("y", v.y.toFixed(0));
@@ -39,7 +47,11 @@ export function App() {
   const [tiles, setTiles] = useState("");
   const [styles, setStyles] = useState<Record<string, LabelStyle>>({});
   const [values, setValues] = useState<Record<string, number[]>>({});
-  const [panel, setPanel] = useState(true);
+  const [left, setLeft] = useState(true);
+  const [right, setRight] = useState(false);
+  const [tab, setTab] = useState<string | null>(null);
+  const [selection, setSelection] = useState<PointPick[]>([]);
+  const [hoverPick, setHoverPick] = useState<PointPick | null>(null);
   const restore = useRef(initialView());
 
   useEffect(() => {
@@ -85,6 +97,49 @@ export function App() {
 
   const setStyle = useCallback((id: string, s: LabelStyle) => setStyles((old) => ({ ...old, [id]: s })), []);
 
+  const ann = useAnnotations(image?.id ?? null);
+  // ?debug exposes the viewer for end-to-end measurements
+  useEffect(() => {
+    if (viewer && new URLSearchParams(location.search).has("debug"))
+      (window as unknown as { __cs?: unknown }).__cs = { viewer, ann };
+  });
+  const objects = useObjects(selection);
+  const layerById = useMemo(() => new Map(ann.layers.map((l) => [l.info.id, l.info])), [ann.layers]);
+  useEffect(() => {
+    viewer?.setPoints(ann.drawn);
+  }, [viewer, ann.drawn]);
+  useEffect(() => {
+    viewer?.setSelection(selection);
+  }, [viewer, selection]);
+  useEffect(() => {
+    setSelection([]);
+    setHoverPick(null);
+  }, [imageId]);
+
+  const onHover = useCallback((p: [number, number] | null, pickInfo: PointPick | null) => {
+    setCursor(p);
+    setHoverPick(pickInfo);
+  }, []);
+  const onClick = useCallback((pk: PointPick | null, add: boolean) => {
+    if (!pk) {
+      if (!add) setSelection([]);
+      return;
+    }
+    setSelection((old) => {
+      const k = objectKey(pk);
+      if (!add) return [pk];
+      return old.some((o) => objectKey(o) === k) ? old.filter((o) => objectKey(o) !== k) : [...old, pk];
+    });
+    setRight(true);
+  }, []);
+
+  const hoverPoint = useMemo(() => {
+    if (!hoverPick) return "";
+    const l = layerById.get(hoverPick.layerId);
+    const g = l?.groups.find((x) => x.index === hoverPick.group);
+    return `${l?.name ?? hoverPick.layerId} › ${g?.name ?? hoverPick.group} #${hoverPick.objectId}`;
+  }, [hoverPick, layerById]);
+
   const hoverLabels = useMemo(() => {
     if (!viewer || !cursor) return "";
     return viewer.labelsAt(cursor[0], cursor[1]).map(({ info, value }) => {
@@ -127,6 +182,8 @@ export function App() {
         "+": () => viewer.zoomBy(1), "=": () => viewer.zoomBy(1), "-": () => viewer.zoomBy(-1),
         "0": () => viewer.fit(), f: () => viewer.fit(), "1": () => viewer.zoomTo(0),
         PageDown: () => cycle(1), PageUp: () => cycle(-1),
+        Escape: () => setSelection([]),
+        "[": () => setLeft((v) => !v), "]": () => setRight((v) => !v),
         l: () => setStyles((old) => {
           const anyVisible = labelInfos.some((i) => (old[i.id] ?? DEFAULT_STYLE).visible);
           return Object.fromEntries(labelInfos.map((i) => [i.id, { ...(old[i.id] ?? DEFAULT_STYLE), visible: !anyVisible }]));
@@ -156,19 +213,41 @@ export function App() {
       <div className="flex h-full flex-col">
         <Toolbar images={images} image={image} view={view} onImage={pick}
                  onZoomBy={(d) => viewer?.zoomBy(d)} onFit={() => viewer?.fit()} onOneToOne={() => viewer?.zoomTo(0)}
-                 labelCount={maps.length} panel={panel} onPanel={() => setPanel((p) => !p)} />
+                 left={left} onLeft={() => setLeft((v) => !v)} right={right} onRight={() => setRight((v) => !v)} />
         <div className="flex min-h-0 flex-1">
+          {left && (
+            <Sidebar side="left" label="Sidebar">
+              <Tabs value={tab ?? (ann.layers.length || !maps.length ? "layers" : "labels")} onValueChange={setTab}
+                    className="flex min-h-0 flex-1 flex-col">
+                <TabsList>
+                  <TabsTrigger value="layers">Layers <span className="text-muted-foreground">{ann.layers.length}</span></TabsTrigger>
+                  <TabsTrigger value="labels">Labels <span className="text-muted-foreground">{maps.length}</span></TabsTrigger>
+                </TabsList>
+                <TabsContent value="layers">
+                  {ann.error && <p className="p-2 text-red-400">{ann.error}</p>}
+                  <LayersPanel stores={ann.stores} layers={ann.layers} onChange={ann.setStyle} />
+                </TabsContent>
+                <TabsContent value="labels"><LabelPanel maps={maps} onChange={setStyle} /></TabsContent>
+              </Tabs>
+            </Sidebar>
+          )}
           <main className="relative min-w-0 flex-1">
-            <ViewerPane onReady={setViewer} onView={setView} onHover={setCursor} />
+            <ViewerPane onReady={setViewer} onView={setView} onHover={onHover} onClick={onClick} />
             {load.state !== "ready" || !image ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
                 {load.state === "loading" ? "Loading…" : load.state === "error" ? load.message : "No images served."}
               </div>
             ) : null}
           </main>
-          {panel && maps.length > 0 && <LabelPanel maps={maps} onChange={setStyle} />}
+          {right && (
+            <Sidebar side="right" label="Inspector">
+              <Inspector selection={selection} layers={layerById} objects={objects} mpp={image?.mpp}
+                         onClear={() => setSelection([])} onClose={() => setRight(false)}
+                         onRemove={(p) => setSelection((old) => old.filter((o) => objectKey(o) !== objectKey(p)))} />
+            </Sidebar>
+          )}
         </div>
-        <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} labels={hoverLabels} />
+        <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} labels={hoverLabels} point={hoverPoint} />
       </div>
     </TooltipProvider>
   );

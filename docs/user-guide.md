@@ -3,8 +3,9 @@
 CompassStudio shows COMPASS whole-slide images and their label maps in the
 browser. A local Python server reads the files; the browser only talks to
 that server. This guide covers every command and the viewer's controls. It
-describes what is implemented now (milestones 1 to 4: images and label maps);
-annotations, editing and multichannel images come later.
+describes what is implemented now (milestones 1 to 5: images, label maps and
+point annotations with picking); polygons, editing and multichannel images
+come later.
 
 ## 1. Requirements
 
@@ -46,12 +47,13 @@ Stop the server with Ctrl+C.
 
 | Option | Meaning |
 |---|---|
-| `--images DIR` | every COMPASS `.zarr` folder directly in `DIR`; id = folder name without `.zarr`. Label maps among them are recognised and paired by themselves (section 5). Repeatable. |
+| `--images DIR` | every COMPASS `.zarr` folder and every annotation store (`*.ann.sqlite`) directly in `DIR`; id = file or folder name without `.zarr` / `.ann.sqlite`. Label maps and stores are paired with their slide by name (sections 5 and 6). Repeatable. |
 | `--image ID=PATH` | one `.zarr` folder under the id `ID`. Repeatable. |
 | `--labels ID=PATH` | one label map (`.zarr`, a single integer channel). Repeatable. |
 | `--label-of ID=IMAGE` | the image a label map belongs to, when automatic pairing does not apply. |
 | `--classes ID=FILE` | class table (JSON) for a label map; default `<map>.classes.json` next to it. |
-| `--annotations ID=PATH` | a COMPASS annotation store (`.ann.sqlite`). Served over the API; the viewer does not show annotations yet (milestone 5). Repeatable. |
+| `--annotations ID=PATH` | a COMPASS annotation store (`.ann.sqlite`). Repeatable. |
+| `--annotations-of ID=IMAGE` | the image an annotation store belongs to, when automatic pairing does not apply (section 6). |
 | `--sidecar-dir DIR` | where edit databases (`<ID>.curation.sqlite`) go; default next to each store. |
 | `--read-only` | no edit databases: annotations cannot be edited. |
 | `--synthetic ID=WxH` | a generated test image, e.g. `--synthetic big=200000x200000`. |
@@ -63,7 +65,7 @@ Stop the server with Ctrl+C.
 |---|---|
 | `--host HOST`, `--port PORT` | address to listen on; default `127.0.0.1:8765`. |
 | `--allow-other-interfaces` | required to listen on anything but 127.0.0.1. Slides may be sensitive: prefer an SSH tunnel (below). |
-| `--allow-origin ORIGIN` | an extra allowed browser origin, e.g. the development server (section 7). |
+| `--allow-origin ORIGIN` | an extra allowed browser origin, e.g. the development server (section 8). |
 | `--web DIR` | the built client to serve at `/` (normally `../web/dist`). Without it only the API is served. |
 | `--tile-threads N` | threads that read and encode tiles; default one per available CPU. |
 | `--reader {auto,zarr}` | `auto` (default) uses the fast direct shard reader where possible; `zarr` forces zarr-python. |
@@ -81,14 +83,19 @@ then open the printed URL (with its token) in the local browser.
 
 ## 4. Using the viewer
 
-The window has a toolbar (image picker, zoom, label maps button), the image,
-an optional label maps panel on the right and a status bar.
+The window has a toolbar, a sidebar on the left (tabs **Layers** and
+**Labels**), the image, an inspector on the right (opens when you select a
+point) and a status bar. Drag a sidebar's inner edge to resize it; the
+width is remembered in this browser.
 
 ### Mouse
 
 - Drag: pan.
 - Wheel: zoom around the cursor.
-- Hover: the status bar shows the cursor position and the label values under it.
+- Hover: the status bar shows the cursor position, the point under it
+  (layer, group, id) and the label values under it.
+- Click a point: select it and show it in the inspector. Shift+click: add
+  or remove a point. Click on empty space: clear the selection.
 
 ### Keys
 
@@ -101,6 +108,9 @@ an optional label maps panel on the right and a status bar.
 | PageDown / PageUp | next / previous image |
 | `l` | show or hide all label maps |
 | `o` | label maps as outlines or filled |
+| Esc | clear the selection |
+| `[` | show or hide the sidebar |
+| `]` | show or hide the inspector |
 
 Keys do nothing while a text field or list has focus.
 
@@ -110,14 +120,14 @@ Keys do nothing while a text field or list has focus.
 - Zoom out, zoom level, zoom in, fit, 1:1. The zoom shows screen px per
   level-0 px and, when the slide records its objective power, the apparent
   magnification.
-- Label maps: opens or closes the panel; shows how many maps the slide has.
+- Sidebar and inspector buttons (right end): show or hide them (`[`, `]`).
 
 ### Status bar
 
 From left to right: cursor in level-0 px, cursor in microns, the pyramid
-level being shown (`L2/7`), microns per pixel, label values under the
-cursor, tile loading (tiles loaded, requests in flight, latency) and a
-scale bar.
+level being shown (`L2/7`), microns per pixel, the point under the cursor
+(`layer › group #id`), label values under the cursor, tile loading (tiles
+loaded, requests in flight, latency) and a scale bar.
 
 ### Keeping your place
 
@@ -161,7 +171,7 @@ colours them automatically.
 
 ### The label maps panel
 
-One card per map:
+In the sidebar's **Labels** tab, one card per map:
 
 - Eye button: show or hide the map.
 - Square button: filled or outlines (class boundaries).
@@ -171,7 +181,54 @@ One card per map:
 
 Class toggles take effect at once; nothing is reloaded from the server.
 
-## 6. Test data
+## 6. Annotation layers
+
+An annotation store (`.ann.sqlite`, written by COMPASS tools) holds layers;
+each layer holds objects (points, polygons, lines) sorted into groups
+(classes). Coordinates are level-0 pixels of the slide. This version draws
+**points**; polygons and lines are listed but not drawn yet (milestone 6).
+The server never writes a store; unless `--read-only` is given it creates
+an edit database `<ID>.curation.sqlite` next to it (or in `--sidecar-dir`),
+used by editing in a later version.
+
+### Pairing with a slide
+
+As for label maps: `--annotations-of STORE=IMAGE`, else by name
+(`slide.zarr` gets `slide.cells.ann.sqlite`, id `slide.cells`), else the
+only image served if the store records the same image size. A store paired
+by name or explicitly must record the slide's size (if it records one), or
+the server refuses to start; a store that pairs with nothing is served but
+not shown, and the server says so at start-up.
+
+### The layers panel
+
+In the sidebar's **Layers** tab, stores of the current slide, each with its
+layers:
+
+- Eye button: show or hide the layer's points.
+- Object counts per type; types not drawn yet are noted.
+- Size: point radius in screen pixels, from 1:4 zoom inward. Zoomed out
+  further, points shrink with the slide (down to 1 px), so millions of
+  points stay fast and readable.
+- Opacity slider.
+- All / None: show or hide every group.
+- One row per group: checkbox (show or hide), colour swatch (click to pick
+  a colour) and the number of points.
+
+Point layers load when a slide opens (all points at once, a spinner shows
+while loading). The first load of a large layer after a server start takes
+a few seconds (5 million points: about 10 s); later loads come from the
+server's memory (under 1 s). Group toggles and colour changes apply at once.
+Layers with more than 128 groups draw every group (toggles are off).
+
+### The inspector
+
+Shows each selected point: name (or id), id, layer, group, type, position
+in pixels and microns, and its attributes (numbers stored with the object;
+fetched from the server when selected). "Clear" or Esc empties the
+selection; the cross on a card removes that point.
+
+## 7. Test data
 
 Keep generated data under `data/` (it is not committed).
 
@@ -184,18 +241,22 @@ class table:
 `--from-level` is the pyramid level that is classified (default 3); lower is
 finer and slower.
 
-Synthetic annotation stores for testing (points, cells, regions):
+Synthetic annotation stores for testing (points, cells, regions). To show
+one on a real slide, give it the slide's size and a name that pairs:
 
-    uv run compass-studio-synth ../data/synth [--name synth] [--points N] [--cells N] [--regions N] ...
+    uv run compass-studio-synth ../data/m5 --name SLIDE.synth --no-arrow --width W --height H \
+        --points 300000 --cells 2000 --regions 3 --attrs 8
+    uv run compass-studio-serve --images ../data --annotations SLIDE.synth=../data/m5/SLIDE.synth.ann.sqlite --web ../web/dist
 
-Run `uv run compass-studio-synth --help` for all options (image size,
-classes, polygon sizes and vertex counts, attributes, seed).
+(`W` and `H` are the slide's size in pixels, printed by the server at
+start-up.) Run `uv run compass-studio-synth --help` for all options (image
+size, classes, polygon sizes and vertex counts, attributes, seed).
 
 Without any slide at hand:
 
     uv run compass-studio-serve --synthetic big=200000x200000 --synthetic-labels big.lab=big --web ../web/dist
 
-## 7. Development
+## 8. Development
 
 - Client with hot reload: start the server with
   `--allow-origin http://127.0.0.1:5173`, then in `web/` run `pnpm dev`
@@ -204,13 +265,17 @@ Without any slide at hand:
   TypeScript API types from `contract/openapi.yaml`.
 - Server and contract tests: in `server/`, `uv run pytest`.
 - End-to-end smoke test (headless Firefox; a server running with
-  `--web ../web/dist` and at least one image):
+  `--web ../web/dist` and at least two images; it also checks label maps and
+  points when the first image has them, points only with a layer of 1,000
+  points or more):
 
       uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR]
 
 - Benchmark pages: `bench.html` on the same server; see `spikes/README.md`.
+- `?debug` in the viewer's address exposes the viewer as `window.__cs` for
+  measurements in the browser console.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 - **"Session token missing or wrong"**: open the exact URL the server
   printed, including `#token=…`; the token changes at every restart unless
@@ -221,6 +286,12 @@ Without any slide at hand:
 - **The server refuses a label map** ("which image does it belong to?",
   or a size mismatch): name it after its slide or pass `--label-of`
   (section 5); it must be the same size as the slide.
+- **The server refuses an annotation store** (size mismatch or "which
+  image does it belong to?"): name it after its slide or pass
+  `--annotations-of` (section 6).
+- **An annotation store does not appear in the Layers tab**: the start-up
+  lines show which image it is on ("annotations X (on SLIDE)"); a store
+  without "on" pairs with nothing.
 - **A label map does not appear**: it shows only with the slide it is
   paired with (see the server's start-up lines); press `l` in case maps are
   hidden.

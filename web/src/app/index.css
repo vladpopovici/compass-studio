@@ -33,6 +33,7 @@
   --popover-foreground: oklch(0.2 0 0);
   --ring: oklch(0.6 0.13 230);
   --canvas: oklch(0.9 0 0);
+  color-scheme: light;
 }
 
 .dark {
@@ -49,7 +50,10 @@
   --popover-foreground: oklch(0.9 0 0);
   --ring: oklch(0.7 0.12 230);
   --canvas: oklch(0.13 0 0);
+  color-scheme: dark;
 }
 
 html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 body { @apply bg-background text-foreground font-sans text-xs antialiased; }
+/* scrollbars follow the theme (Firefox ignores color-scheme for GTK scrollbars) */
+* { scrollbar-color: var(--border) transparent; scrollbar-width: thin; }

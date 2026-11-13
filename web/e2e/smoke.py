@@ -1,4 +1,4 @@
-"""End-to-end smoke test of the milestone 3 viewer in headless Firefox.
+"""End-to-end smoke test of the viewer in headless Firefox.
 
     cd server && uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR]
 
@@ -7,6 +7,8 @@ Checks: tiles load, keyboard zoom/fit/1:1, mouse drag and wheel, cursor
 coordinates, the view kept in the URL across a reload, image switching, the
 error shown without a token, and no console errors. If the first image has
 label maps: the panel, label values under the cursor, `l` and class toggles.
+If it has a point layer with at least 1000 points: hover, click selection
+and the inspector's attributes, Shift+click, Esc, and group toggles.
 """
 
 import argparse
@@ -55,8 +57,81 @@ async def hover_label(ff) -> tuple[int, int, str] | None:
     return None
 
 
+POINT_HOVER = "document.querySelector('footer [title=\"Point under the cursor\"]').textContent"
+# the point layer with the most points
+LAYER = ("[...document.querySelectorAll('[data-points]')].filter(e => +e.dataset.points > 0)"
+         ".sort((a, b) => b.dataset.points - a.dataset.points)[0]")
+
+
+async def hover_point(ff, avoid: str = "") -> tuple[int, int, str] | None:
+    for y in range(120, 620, 9):
+        for x in range(320, 1300, 9):
+            await ff.mouse([{"type": "pointerMove", "x": x, "y": y}])
+            t = await ff.eval(POINT_HOVER)
+            if t and t != avoid:
+                # hover picks on the next frame: confirm at rest before using it
+                await asyncio.sleep(0.15)
+                t = await ff.eval(POINT_HOVER)
+                if t and t != avoid:
+                    return x, y, t
+    return None
+
+
+async def check_points(ff, check, shots):
+    """Point layers of the first image: drawn, picked, inspected, filtered."""
+    await ff.wait_for(f"{LAYER} && !document.querySelector('[aria-label=\"Loading\"]') && 1", 120)
+    layer = await ff.eval(f"{LAYER}.dataset.layer")
+    check(True, f"point layer {layer} loaded")
+    await ff.key("+")
+    await ff.key("+")
+    await asyncio.sleep(1)
+    await ff.wait_for(TILES_IDLE)
+    hit = await hover_point(ff)
+    check(hit is not None, f"hovering a point names it: {hit}")
+    if not hit:
+        return
+    x, y, _ = hit
+    await ff.mouse([{"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}])
+    insp = await ff.wait_for("(() => { const a = document.querySelector('aside[aria-label=Inspector]');"
+                             " const t = a?.innerText ?? ''; return t.includes('Id') && !t.includes('Loading attributes')"
+                             " ? t : null; })()", 15)
+    check("Group" in insp and "Position" in insp, f"click opens the inspector: {' '.join(insp.split())[:120]}")
+    if shots:
+        await ff.screenshot(shots / "6-selected.png")
+    hit2 = await hover_point(ff, avoid=hit[2])
+    if hit2:
+        await ff.send("input.performActions", {"context": ff.context, "actions": [
+            {"type": "key", "id": "kbd", "actions": [{"type": "keyDown", "value": "\ue008"}]},
+            {"type": "pointer", "id": "mouse", "parameters": {"pointerType": "mouse"}, "actions": [
+                {"type": "pause"}, {"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}]}]})
+        await ff.send("input.releaseActions", {"context": ff.context})
+        await asyncio.sleep(0.5)
+        n = await ff.eval("document.querySelectorAll('aside[aria-label=Inspector] [data-object]').length")
+        check(n == 2, f"Shift+click adds a second object ({n} selected)")
+    await ff.key("\ue00c")  # Escape
+    await asyncio.sleep(0.3)
+    n = await ff.eval("document.querySelectorAll('aside[aria-label=Inspector] [data-object]').length")
+    check(n == 0, "Esc clears the selection")
+    await ff.eval(f"[...{LAYER}.querySelectorAll('button')].find(b => b.textContent === 'None').click(), 1")
+    await asyncio.sleep(0.5)
+    await ff.mouse([{"type": "pointerMove", "x": x + 1, "y": y}, {"type": "pointerMove", "x": x, "y": y}])
+    await asyncio.sleep(0.3)
+    check(await ff.eval(POINT_HOVER) == "", "'None' hides every group (nothing to pick)")
+    await ff.eval(f"[...{LAYER}.querySelectorAll('button')].find(b => b.textContent === 'All').click(), 1")
+    await ff.key("]")  # close the inspector
+    await ff.key("0")
+    await asyncio.sleep(0.5)
+
+
 async def check_labels(ff, check, shots):
-    check(True, "label maps panel shown")
+    # a real pointer click: Radix tabs switch on mousedown, not on a synthetic click()
+    r = await ff.eval("(() => { const b = [...document.querySelectorAll('[role=tab]')].find(t => t.textContent.startsWith('Labels'))"
+                      ".getBoundingClientRect(); return [Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)]; })()")
+    await ff.mouse([{"type": "pointerMove", "x": r[0], "y": r[1]}, {"type": "pointerDown", "button": 0},
+                    {"type": "pointerUp", "button": 0}])
+    await asyncio.sleep(0.3)
+    check(await ff.eval("document.querySelector('[role=tab][aria-selected=true]')?.textContent.startsWith('Labels')"),
+          "label maps tab shown")
     await ff.wait_for(TILES_IDLE)
     await asyncio.sleep(0.5)
     if shots:
@@ -78,16 +153,15 @@ async def check_labels(ff, check, shots):
         await ff.wait_for(TILES_IDLE)
         await ff.screenshot(shots / "5-outlines.png")
     await ff.key("o")
-    n = await ff.eval("document.querySelectorAll('aside input[type=checkbox]').length")
-    await ff.eval("document.querySelector('aside button:nth-of-type(1)') && 1")
-    none = await ff.eval("(() => { const b = [...document.querySelectorAll('aside button')].find(b => b.textContent === 'None');"
+    n = await ff.eval("document.querySelectorAll('aside [role=tabpanel] input[type=checkbox]').length")
+    none = await ff.eval("(() => { const b = [...document.querySelectorAll('aside [role=tabpanel] button')].find(b => b.textContent === 'None');"
                          " b.click(); return 1; })()")
     await asyncio.sleep(0.3)
-    checked = await ff.eval("[...document.querySelectorAll('aside input[type=checkbox]')].filter(c => c.checked).length")
+    checked = await ff.eval("[...document.querySelectorAll('aside [role=tabpanel] input[type=checkbox]')].filter(c => c.checked).length")
     check(none and n > 0 and checked == 0, f"'None' unchecks all {n} classes")
-    await ff.eval("[...document.querySelectorAll('aside button')].find(b => b.textContent === 'All').click(), 1")
+    await ff.eval("[...document.querySelectorAll('aside [role=tabpanel] button')].find(b => b.textContent === 'All').click(), 1")
     await asyncio.sleep(0.3)
-    checked = await ff.eval("[...document.querySelectorAll('aside input[type=checkbox]')].filter(c => c.checked).length")
+    checked = await ff.eval("[...document.querySelectorAll('aside [role=tabpanel] input[type=checkbox]')].filter(c => c.checked).length")
     check(checked == n, "'All' checks them again")
 
 
@@ -113,8 +187,14 @@ async def main() -> int:
             a.shots.mkdir(parents=True, exist_ok=True)
             await ff.screenshot(a.shots / "1-fit.png")
 
-        labels = await ff.eval("document.querySelector('aside h2')?.textContent ?? null")
-        if labels:
+        tabs = await ff.eval("[...document.querySelectorAll('[role=tab]')].map(t => t.textContent).join('|')")
+        most = await ff.eval(f"+({LAYER}?.dataset.points ?? 0)")
+        if most >= 1000:
+            await check_points(ff, check, a.shots)
+            v0 = await url_view(ff)
+        else:
+            print(f"SKIP points (largest point layer has {most} points; needs 1000 to find one by hovering)")
+        if "Labels 0" not in tabs:
             await check_labels(ff, check, a.shots)
             v0 = await url_view(ff)
 

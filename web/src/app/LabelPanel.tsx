@@ -71,10 +71,6 @@ function MapCard({ m, onChange }: { m: LabelMapState; onChange: (s: LabelStyle) 
 }
 
 export function LabelPanel({ maps, onChange }: { maps: LabelMapState[]; onChange: (id: string, s: LabelStyle) => void }) {
-  return (
-    <aside className="flex w-64 shrink-0 flex-col overflow-y-auto border-l border-border">
-      <h2 className="border-b border-border px-2 py-1.5 font-semibold">Label maps</h2>
-      {maps.map((m) => <MapCard key={m.info.id} m={m} onChange={(s) => onChange(m.info.id, s)} />)}
-    </aside>
-  );
+  if (!maps.length) return <p className="p-2 text-muted-foreground">No label maps for this image.</p>;
+  return <div>{maps.map((m) => <MapCard key={m.info.id} m={m} onChange={(s) => onChange(m.info.id, s)} />)}</div>;
 }

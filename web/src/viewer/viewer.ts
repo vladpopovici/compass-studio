@@ -6,6 +6,7 @@ import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState 
 import type { ImageInfo } from "../api";
 import type { Layer } from "@deck.gl/core";
 import { LabelSource, type LabelStyle } from "./labels";
+import { selectionLayers, type PointPick, type PointSource, type PointStyle } from "./points";
 import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats, type TileOptions } from "./tiles";
 
 export interface View {
@@ -21,7 +22,10 @@ export interface View {
 
 export interface ViewerOptions {
   onView?: (v: View) => void;
-  onHover?: (p: [number, number] | null) => void;
+  /** cursor in level-0 px, and the point under it */
+  onHover?: (p: [number, number] | null, pick: PointPick | null) => void;
+  /** click: the point under the cursor (null: none); `add` with Shift */
+  onClick?: (pick: PointPick | null, add: boolean) => void;
   tiles?: TileOptions;
   /** zoom limits relative to 1:1; the lower limit is also bounded by fit - 1 */
   maxZoom?: number;
@@ -31,6 +35,8 @@ const ANIMATE_MS = 180;
 
 export class Viewer {
   readonly stats = new TileStats();
+  /** frames rendered so far (for measurements) */
+  frames = 0;
   private deck: Deck<OrthographicView>;
   private info: ImageInfo | null = null;
   private vs: OrthographicViewState = { target: [0, 0, 0], zoom: 0 };
@@ -38,6 +44,8 @@ export class Viewer {
   private resize: ResizeObserver;
   private imageLayer: Layer | null = null;
   private labels = new Map<string, { source: LabelSource; style: LabelStyle }>();
+  private points: { source: PointSource; style: PointStyle }[] = [];
+  private selection: PointPick[] = [];
 
   constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
     this.deck = new Deck({
@@ -48,9 +56,15 @@ export class Viewer {
       onViewStateChange: ({ viewState }) => {
         this.setViewState(viewState as OrthographicViewState);
       },
-      onHover: ({ coordinate }) => this.opts.onHover?.(coordinate ? [coordinate[0], coordinate[1]] : null),
-      onAfterRender: () => this.stats.markDrawn(performance.now()),
-      getCursor: ({ isDragging }) => (isDragging ? "grabbing" : "crosshair"),
+      onHover: (info) => this.opts.onHover?.(info.coordinate ? [info.coordinate[0], info.coordinate[1]] : null,
+                                              this.pointPick(info.layer?.id, info.index)),
+      onClick: (info, ev) => this.opts.onClick?.(this.pointPick(info.layer?.id, info.index),
+                                                 !!(ev.srcEvent as MouseEvent | undefined)?.shiftKey),
+      onAfterRender: () => {
+        this.frames++;
+        this.stats.markDrawn(performance.now());
+      },
+      getCursor: ({ isDragging, isHovering }) => (isDragging ? "grabbing" : isHovering ? "pointer" : "crosshair"),
     });
     this.resize = new ResizeObserver(() => {
       const r = parent.getBoundingClientRect();
@@ -109,6 +123,30 @@ export class Viewer {
     return out;
   }
 
+  /** Point layers drawn above the label maps, bottom first. */
+  setPoints(entries: { source: PointSource; style: PointStyle }[]) {
+    this.points = entries;
+    this.render();
+  }
+
+  /** Selected points, ringed. */
+  setSelection(picks: PointPick[]) {
+    this.selection = picks;
+    this.render();
+  }
+
+  private pointPick(layerId: string | undefined, index: number): PointPick | null {
+    if (!layerId || index < 0) return null;
+    const e = this.points.find((p) => `points-${p.source.id}` === layerId);
+    return e ? e.source.pick(index) : null;
+  }
+
+  /** Point under a canvas position (CSS px), as hover would pick it; for measurements. */
+  pickAt(x: number, y: number): PointPick | null {
+    const info = this.deck.pickObject({ x, y, radius: 0 });
+    return info ? this.pointPick(info.layer?.id, info.index) : null;
+  }
+
   labelSource(id: string): LabelSource | undefined {
     return this.labels.get(id)?.source;
   }
@@ -116,6 +154,11 @@ export class Viewer {
   private render() {
     const layers: Layer[] = this.imageLayer ? [this.imageLayer] : [];
     for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
+    for (const { source, style } of this.points) if (source.loaded) layers.push(source.layer(style));
+    if (this.selection.length) {
+      const size = Math.max(3, ...this.points.map((p) => p.style.size));
+      layers.push(...selectionLayers(this.selection, size));
+    }
     this.deck.setProps({ layers });
   }
 

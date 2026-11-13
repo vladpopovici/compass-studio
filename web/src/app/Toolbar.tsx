@@ -1,4 +1,4 @@
-import { Layers, Maximize, Ratio, ZoomIn, ZoomOut } from "lucide-react";
+import { Maximize, PanelLeft, PanelRight, Ratio, ZoomIn, ZoomOut } from "lucide-react";
 import type * as React from "react";
 import type { ImageInfo } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ function Tip({ label, keys, children }: { label: string; keys?: string; children
 export function Toolbar(props: {
   images: ImageInfo[]; image: ImageInfo | null; view: View | null; onImage: (id: string) => void;
   onZoomBy: (d: number) => void; onFit: () => void; onOneToOne: () => void;
-  labelCount: number; panel: boolean; onPanel: () => void;
+  left: boolean; onLeft: () => void; right: boolean; onRight: () => void;
 }) {
   const { images, image, view } = props;
   const mag = image && view ? magnification(image.objective_power, view.zoom) : null;
@@ -46,14 +46,10 @@ export function Toolbar(props: {
       <Tip label="Fit to window" keys="0"><Button size="icon" aria-label="Fit" onClick={props.onFit}><Maximize /></Button></Tip>
       <Tip label="Actual pixels (1:1)" keys="1"><Button size="icon" aria-label="1:1" onClick={props.onOneToOne}><Ratio /></Button></Tip>
       <div className="flex-1" />
-      {props.labelCount > 0 && (
-        <Tip label="Label maps panel (l: show or hide maps, o: outlines)">
-          <Button aria-label="Label maps" aria-pressed={props.panel} onClick={props.onPanel}
-                  className={props.panel ? "text-foreground" : undefined}>
-            <Layers />Labels <span className="text-muted-foreground">{props.labelCount}</span>
-          </Button>
-        </Tip>
-      )}
+      <Tip label="Layers and label maps" keys="["><Button size="icon" aria-label="Sidebar" aria-pressed={props.left}
+        onClick={props.onLeft} className={props.left ? "text-foreground" : undefined}><PanelLeft /></Button></Tip>
+      <Tip label="Inspector" keys="]"><Button size="icon" aria-label="Inspector" aria-pressed={props.right}
+        onClick={props.onRight} className={props.right ? "text-foreground" : undefined}><PanelRight /></Button></Tip>
     </header>
   );
 }

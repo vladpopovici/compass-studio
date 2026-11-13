@@ -10,7 +10,8 @@ export function ViewerPane({ onReady, ...opts }: ViewerOptions & { onReady: (v: 
     const v = new Viewer(ref.current!, {
       ...optsRef.current,
       onView: (view) => optsRef.current.onView?.(view),
-      onHover: (p) => optsRef.current.onHover?.(p),
+      onHover: (p, pick) => optsRef.current.onHover?.(p, pick),
+      onClick: (pick, add) => optsRef.current.onClick?.(pick, add),
     });
     onReady(v);
     return () => {

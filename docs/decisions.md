@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 and 4 done (2026-11-13); next is milestone 5. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 5 done (2026-11-13); next is milestone 6. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -97,6 +97,10 @@ later because the client depends only on the contract (D2).
   1.1.0 (2026-11-13, milestone 3, additive): image `name`,
   `objective_power` and `version`; image tiles with `?v={version}` are
   immutable in the browser cache, others revalidate (`ETag`, 304).
+  1.3.0 (2026-11-13, milestone 5, additive): `Store.aligned_to`, the image
+  a store annotates, paired like label maps (explicit `--annotations-of`,
+  else dotted name prefix, `slide` / `slide.cells`, else the only image if
+  the recorded size matches); `--images DIR` also serves `*.ann.sqlite`.
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -205,6 +209,23 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   read about 0.1 ms and gzip under 1 ms per tile, 6 to 14 kB per tile;
   a class toggle reaches the screen in two frames (32 to 34 ms, headless
   Firefox, 25 tiles on screen), within the 50 ms budget.
+- Points in the viewer (milestone 5, 2026-11-13): each point layer is
+  fetched whole when its slide opens and drawn as a binary ScatterplotLayer;
+  group toggles use DataFilterExtension categories with the
+  category-to-bit mapping overridden to the identity (deck assigns bits in
+  order of first appearance, which breaks when a layer starts with groups
+  hidden); at most 128 groups per layer filter. Colours per group live in
+  their own attribute buffer; a change replaces only that attribute's
+  descriptor (deck compares binary attribute descriptors by identity, so
+  mutating `.value` is ignored). Radius: the chosen size in screen px from
+  1:4 zoom inward, shrinking with the slide when zoomed out further (to
+  1 px): at fit, 5M overlapping 3 px discs were fill-rate bound (frame p95
+  34 ms); with shrinking, 60 fps at every zoom. Hover and click pick by
+  index (object id from the Arrow buffer); attributes are fetched by id
+  when selected. Measured (workstation, headless Firefox, 4 server CPUs,
+  5M-point synthetic layer): group toggle 16 to 20 ms to screen, pick 3 to
+  6 ms p95; first open 10.4 s (layer listing with counts 4.6 s, point
+  buffer 5.7 s for 90 MB), later opens 0.8 s (server caches).
 - Groups and layers: client-side GPU filtering on layer and group attributes.
   S3 (2026-11-13): points use DataFilterExtension categories (group ids
   rebased to 0..k-1; at most 128 groups per layer). Polygons use one layer
@@ -281,6 +302,11 @@ the panels of milestone 5. The viewer core (`web/src/viewer/`) is
 framework-free and shared with the spike benches (`web/bench.html`). System
 fonts only. Keyboard: arrows, `+`/`-`, `0`/`f` fit, `1` actual pixels,
 PageUp/PageDown images; the view is kept in the URL query.
+Milestone 5 (2026-11-13): tabbed sidebars instead of dockview: a left
+sidebar (tabs Layers and Labels) and a right inspector, both collapsible
+(`[`, `]`) and resizable. dockview is deferred to milestone 7, when the
+annotation table and minimap need free docking. Selection: click, Shift+click
+to add, Esc to clear; hover names the point in the status bar.
 
 ### D10. Security and privacy
 Slides may be sensitive. The server binds to 127.0.0.1 by default; a random
@@ -321,7 +347,7 @@ baseline (D5).
 2. Spikes S1 to S6; freeze contract v1. Done 2026-11-13.
 3. RGB tile server and pan/zoom viewer. Done 2026-11-13 (laptop check by the owner pending).
 4. Label maps with class toggles. Done 2026-11-13.
-5. Points: layer view, picking, attribute panel.
+5. Points: layer view, picking, attribute panel. Done 2026-11-13.
 6. Polygons with level of detail.
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
    undo and redo, commits with revisions.
@@ -352,5 +378,7 @@ baseline (D5).
   (S4 server cost); whether the GPU needs an earlier switch, and the density
   raster, are open.
 - Layer object counts (`Layer.counts`) are computed with a full join on
-  first use: 3.3 s for the 6M-object synthetic store. Cache them in the
-  sidecar or compute them in the background.
+  first use: 3.3 s for the 6M-object synthetic store (4.6 s for the first
+  layer listing in milestone 5, which delays the first open of a slide).
+  Cache them in the sidecar or compute them in the background. The first
+  5M-point buffer takes 5.7 s; a disk cache would remove it.
