@@ -17,6 +17,8 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 
 ## Build and run
 
+Full usage, all commands and options: `docs/user-guide.md`.
+
     pnpm install && pnpm build
     cd ../server && uv run compass-studio-serve --images <folder of .zarr images> --web ../web/dist
 
