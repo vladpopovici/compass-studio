@@ -201,8 +201,9 @@ frozen schema document is needed from the COMPASS side (section 8).
   5,000-vertex regions, with 1M polygons resident. Checked-out objects are
   hidden by a value filter whose GPU buffer is rewritten only for the
   object's vertices. Dragging a vertex of a 5,000-vertex polygon runs at
-  about 30 fps (editable-layers' per-move JavaScript); large polygons need
-  zoomed-in or local editing, and client-side validity checks (the server
+  about 30 fps (editable-layers' per-move JavaScript); accepted 2026-11-13:
+  polygons with many vertices are rarely edited by hand, so no special tool
+  is planned. Client-side validity checks are still needed (the server
   refuses self-intersections). Details: `docs/spikes/S5.md`.
 - Out of v1: merge-back of curated layers into a COMPASS store; raster label
   painting (the image store is write-once by design, and a sharded
