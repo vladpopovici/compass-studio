@@ -43,11 +43,12 @@ Measured on a low-end reference machine (laptop, integrated GPU only):
 
 These are proposals to be confirmed or adjusted by the spikes.
 
-Spike runs (2026-11-12): pass/fail numbers come from the reference laptop
-(project duplicated there). Runs on the development workstation are limited to
-4 CPUs and 32 GB RAM to approximate it; this is representative for the server
-spikes (S1, S4, S6) but not for GPU-bound ones (S2, S3, S5), whose workstation
-results are indicative only.
+Spike runs (revised 2026-11-13): after S2, all spikes run on the development
+workstation only, limited to 4 CPUs and 32 GB RAM. This is representative for
+the server spikes (S1, S4, S6). For the GPU-bound ones (S3, S5) the workstation
+GPU is far stronger than the reference laptop's, so their frame-rate numbers
+are optimistic; the owner accepts that risk (S2 on the laptop was close to the
+workstation result). The laptop is not used for further spike runs.
 
 ## 3. Architecture
 
@@ -113,13 +114,17 @@ baseline: as of 2026-11 browser support on Linux still sits behind flags or is
 in progress, and deck.gl's WebGPU support is partial. Revisit later.
 Fallback if the editing spike (S5) fails: OpenLayers (built-in draw, modify and
 snap interactions, custom pixel projections). Coordinate precision (S2,
-workstation, 2026-11-12; laptop confirmation pending): no motion jitter up to
-262k px and 256x overzoom; absolute level-0 coordinates are exact through
+workstation 2026-11-12, reference laptop 2026-11-13, Firefox and Chromium):
+no motion jitter up to 262k px and 256x overzoom; absolute level-0
+coordinates are exact through
 accessor-built layers and BitmapLayer bounds; float32 binary positions give a
 static offset of at most 1/128 px x 2^zoom at 131k to 262k px (1 px at 128x
 overzoom), acceptable for annotation buffers. `coordinateOrigin` has no effect
 for CARTESIAN data in an OrthographicView, and `modelMatrix` does not recover
-precision. Details: `docs/spikes/S2.md`.
+precision. S2 frame rate on the reference laptop: 60 fps through scripted
+pan and zoom in Chromium; in Firefox 60 fps panning, with drops to 30 fps
+during zooms; over 52 fps in manual use, with stutter on fast pans (open for
+milestone 3). Details: `docs/spikes/S2.md`.
 
 ### D6. Annotation delivery
 - Points: the whole layer as binary buffers (x, y, class, object id), GPU

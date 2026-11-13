@@ -37,6 +37,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if a.host != "127.0.0.1" and not a.allow_other_interfaces:
         ap.error("binding to other interfaces needs --allow-other-interfaces")
+    if a.web is not None and not (a.web / "index.html").is_file():
+        ap.error(f"--web {a.web}: no index.html; build the client first "
+                 "(cd web && pnpm install && pnpm build)")
     images = {k: ZarrPyramid(v) for k, v in a.image}
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
