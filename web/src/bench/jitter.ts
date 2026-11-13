@@ -20,7 +20,7 @@
 
 import { Deck, OrthographicView, type Layer } from "@deck.gl/core";
 import { BitmapLayer, SolidPolygonLayer } from "@deck.gl/layers";
-import { postResults } from "./api";
+import { postResults } from "../api";
 import { environment, nextFrame } from "./env";
 
 const XS = [1_000, 50_000, 100_000, 150_000, 199_000, 262_000].map((x) => x + 0.3);

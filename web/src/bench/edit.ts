@@ -23,7 +23,7 @@ import { DataFilterExtension } from "@deck.gl/extensions";
 import { GeoJsonLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { DrawPolygonMode, EditableGeoJsonLayer, ModifyMode } from "@deck.gl-community/editable-layers";
 import { buildPolygons, fetchTable, PALETTE, type Meta, type Part } from "./annot";
-import { authHeaders, postResults, type LayerInfo } from "./api";
+import { authHeaders, postResults, type LayerInfo } from "../api";
 import { environment, nextFrame, percentiles } from "./env";
 
 const params = new URLSearchParams(location.search);

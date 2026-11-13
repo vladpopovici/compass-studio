@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done and contract v1 frozen (2026-11-13); next is milestone 3. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestone 3 done (2026-11-13); next is milestone 4. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -155,6 +155,19 @@ precision. S2 frame rate on the reference laptop: 60 fps through scripted
 pan and zoom in Chromium; in Firefox 60 fps panning, with drops to 30 fps
 during zooms; over 52 fps in manual use, with stutter on fast pans (open for
 milestone 3). Details: `docs/spikes/S2.md`.
+Tile loading (milestone 3, 2026-11-13, workstation, headless Firefox, sample
+slide, flight with 6,000 px/s flings added): no variant stutters on the
+workstation (frame p99 about 17 ms, deck render at most 8 ms), so the
+laptop stutter is not reproduced here; the variants differ in sharpness
+(share of on-screen tiles at the target level, per frame) and latency.
+Default now: 6 concurrent requests (deck's scheduler, not the browser,
+orders them) and a one-tile prefetch ring at the current level: pans and
+flings stay fully sharp (1.0 against 0.94 to 0.98 with the S2 settings),
+tile-to-screen p95 45 ms against 52 to 65 ms, at about 1.9x the requests.
+Rejected: request debounce (sharpness down to 0.41 when zooming out) and a
+per-frame texture-upload limit (0.64), both kept as options
+(`TILE_PRESETS`). Whether the laptop stutter remains is to be checked by
+the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
 
 ### D6. Annotation delivery
 - Points: the whole layer as binary buffers (x, y, class, object id), GPU
@@ -244,6 +257,12 @@ px and micron coordinates and a scale bar; command palette; keyboard-first tools
 Stack: React, shadcn/ui (Tailwind), dockview **[verify maintenance]**, TanStack
 Table with virtualization, Lucide icons. Alternative: Mantine (batteries
 included).
+Milestone 3 (2026-11-13): React 19, Tailwind 4 and shadcn/ui components
+(Radix) in a fixed layout (toolbar, viewer, status bar); dockview waits for
+the panels of milestone 5. The viewer core (`web/src/viewer/`) is
+framework-free and shared with the spike benches (`web/bench.html`). System
+fonts only. Keyboard: arrows, `+`/`-`, `0`/`f` fit, `1` actual pixels,
+PageUp/PageDown images; the view is kept in the URL query.
 
 ### D10. Security and privacy
 Slides may be sensitive. The server binds to 127.0.0.1 by default; a random
@@ -282,7 +301,7 @@ baseline (D5).
 
 1. Repository, contract skeleton, sample data and synthetic annotation generator.
 2. Spikes S1 to S6; freeze contract v1. Done 2026-11-13.
-3. RGB tile server and pan/zoom viewer.
+3. RGB tile server and pan/zoom viewer. Done 2026-11-13 (laptop check by the owner pending).
 4. Label maps with class toggles.
 5. Points: layer view, picking, attribute panel.
 6. Polygons with level of detail.

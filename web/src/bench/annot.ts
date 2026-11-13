@@ -28,7 +28,7 @@ import { Deck, OrthographicView, type Layer, type OrthographicViewState } from "
 import { DataFilterExtension } from "@deck.gl/extensions";
 import { ScatterplotLayer, SolidPolygonLayer } from "@deck.gl/layers";
 import { tableFromIPC, type Table } from "apache-arrow";
-import { authHeaders, postResults } from "./api";
+import { authHeaders, postResults } from "../api";
 import { environment, nextFrame, percentiles } from "./env";
 
 const params = new URLSearchParams(location.search);

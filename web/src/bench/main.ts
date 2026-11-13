@@ -1,19 +1,20 @@
-// S2 harness: deck.gl OrthographicView + TileLayer over the tile server.
+// Spike benches (bench.html): deck.gl OrthographicView + TileLayer over the tile server.
 //
 // URL: /?image=<id>[&bench=pan|jitter]#token=<token>
 //   no bench   interactive viewer with a HUD
 //   bench=pan  scripted zoom/pan flight, cold then warm; posts frame and tile timings
+//              (&tiles=<preset>: tile loading options, see viewer/tiles.ts)
 //   bench=jitter  sub-pixel edge placement at large coordinates and deep zoom
 //   bench=annot   S3: 5M points and 1M polygons resident (see annot.ts)
 //   bench=edit    S5: check-out, vertex editing, commit (see edit.ts)
 
 import { Deck, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
-import { getJSON, type ImageInfo } from "./api";
+import { getJSON, type ImageInfo } from "../api";
 import { runAnnot } from "./annot";
 import { runEdit } from "./edit";
 import { runJitter } from "./jitter";
 import { runPan } from "./pan";
-import { fitZoom, makeTileLayer, TileStats } from "./tiles";
+import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats } from "../viewer/tiles";
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById("hud")!;
@@ -39,7 +40,7 @@ async function interactive(info: ImageInfo) {
       const um = info.mpp ? `  ${(x * info.mpp).toFixed(1)}, ${(y * info.mpp).toFixed(1)} µm` : "";
       cursor = `${x.toFixed(1)}, ${y.toFixed(1)} px${um}`;
     },
-    layers: [makeTileLayer(info, stats)],
+    layers: [makeTileLayer(info, stats, "", TILE_PRESETS[params.get("tiles") ?? "tuned"])],
   });
   let frames = 0, fps = 0, t0 = performance.now();
   const tick = () => { frames++; requestAnimationFrame(tick); };
@@ -72,7 +73,7 @@ async function main() {
   const id = params.get("image") ?? images[0].id;
   const info = images.find((i) => i.id === id);
   if (!info) throw new Error(`no image ${id}`);
-  if (bench === "pan") await runPan(info, hud);
+  if (bench === "pan") await runPan(info, hud, params.get("tiles") ?? "tuned");
   else await interactive(info);
 }
 

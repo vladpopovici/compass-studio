@@ -1,0 +1,153 @@
+// Framework-free slide viewer: a deck.gl OrthographicView over level-0 pixel
+// coordinates (y down) with the image tile layer. The React shell and the
+// spike benches drive it through this class only.
+
+import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
+import type { ImageInfo } from "../api";
+import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats, type TileOptions } from "./tiles";
+
+export interface View {
+  /** level-0 px at the centre of the canvas */
+  x: number;
+  y: number;
+  /** log2 of screen px per level-0 px (0 = 1:1) */
+  zoom: number;
+  /** canvas size in CSS px */
+  width: number;
+  height: number;
+}
+
+export interface ViewerOptions {
+  onView?: (v: View) => void;
+  onHover?: (p: [number, number] | null) => void;
+  tiles?: TileOptions;
+  /** zoom limits relative to 1:1; the lower limit is also bounded by fit - 1 */
+  maxZoom?: number;
+}
+
+const ANIMATE_MS = 180;
+
+export class Viewer {
+  readonly stats = new TileStats();
+  private deck: Deck<OrthographicView>;
+  private info: ImageInfo | null = null;
+  private vs: OrthographicViewState = { target: [0, 0, 0], zoom: 0 };
+  private size: [number, number] = [1, 1];
+  private resize: ResizeObserver;
+
+  constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
+    this.deck = new Deck({
+      parent,
+      views: new OrthographicView({ id: "ortho", flipY: true }),
+      viewState: this.vs,
+      controller: { inertia: 300, scrollZoom: { speed: 0.02, smooth: true }, keyboard: false, doubleClickZoom: true },
+      onViewStateChange: ({ viewState }) => {
+        this.setViewState(viewState as OrthographicViewState);
+      },
+      onHover: ({ coordinate }) => this.opts.onHover?.(coordinate ? [coordinate[0], coordinate[1]] : null),
+      onAfterRender: () => this.stats.markDrawn(performance.now()),
+      getCursor: ({ isDragging }) => (isDragging ? "grabbing" : "crosshair"),
+    });
+    this.resize = new ResizeObserver(() => {
+      const r = parent.getBoundingClientRect();
+      this.size = [Math.max(1, r.width), Math.max(1, r.height)];
+      this.setViewState(this.vs);
+    });
+    this.resize.observe(parent);
+    const r = parent.getBoundingClientRect();
+    this.size = [Math.max(1, r.width), Math.max(1, r.height)];
+  }
+
+  get image() {
+    return this.info;
+  }
+
+  /** Show an image; `view` restores a position (else fit). */
+  setImage(info: ImageInfo | null, view?: Partial<Pick<View, "x" | "y" | "zoom">>) {
+    this.info = info;
+    if (!info) {
+      this.deck.setProps({ layers: [] });
+      return;
+    }
+    this.deck.setProps({ layers: [makeTileLayer(info, this.stats, "", this.opts.tiles ?? TILE_PRESETS.tuned)] });
+    const fit = this.fitZoom();
+    this.setViewState({
+      target: [view?.x ?? info.width / 2, view?.y ?? info.height / 2, 0],
+      zoom: view?.zoom ?? fit,
+    });
+  }
+
+  view(): View {
+    const [x, y] = this.vs.target as number[];
+    return { x, y, zoom: this.vs.zoom as number, width: this.size[0], height: this.size[1] };
+  }
+
+  fitZoom(): number {
+    return this.info ? fitZoom(this.info, this.size[0] * 0.95, this.size[1] * 0.95) : 0;
+  }
+
+  fit() {
+    if (!this.info) return;
+    this.animate([this.info.width / 2, this.info.height / 2], this.fitZoom());
+  }
+
+  zoomTo(zoom: number, around?: [number, number]) {
+    const v = this.view();
+    let target: [number, number] = [v.x, v.y];
+    if (around) {
+      // keep the level-0 point `around` fixed on screen
+      const k = 2 ** (v.zoom - this.clampZoom(zoom));
+      target = [around[0] + (v.x - around[0]) * k, around[1] + (v.y - around[1]) * k];
+    }
+    this.animate(target, zoom);
+  }
+
+  zoomBy(delta: number) {
+    this.zoomTo((this.vs.zoom as number) + delta);
+  }
+
+  /** Pan by a fraction of the canvas size. */
+  panBy(fx: number, fy: number) {
+    const v = this.view();
+    const s = 2 ** v.zoom;
+    this.animate([v.x + (fx * v.width) / s, v.y + (fy * v.height) / s], v.zoom);
+  }
+
+  destroy() {
+    this.resize.disconnect();
+    this.deck.finalize();
+  }
+
+  private clampZoom(z: number) {
+    const lo = this.fitZoom() - 1, hi = this.opts.maxZoom ?? 6;
+    return Math.min(hi, Math.max(Math.min(lo, hi), z));
+  }
+
+  private animate(target: [number, number], zoom: number) {
+    this.setViewState({
+      target: [target[0], target[1], 0], zoom,
+      transitionDuration: ANIMATE_MS,
+      transitionInterpolator: new LinearInterpolator(["target", "zoom"]),
+    });
+  }
+
+  private setViewState(v: OrthographicViewState) {
+    // Change deck's objects only where clamping changes a value: during a
+    // transition deck compares the states we hand back with its own
+    // (target arrays included) and restarts the transition on any difference.
+    const zoom = this.clampZoom(v.zoom as number);
+    const t = v.target as number[];
+    let [x, y] = t;
+    if (this.info) {
+      // the view centre stays on the image
+      x = Math.min(this.info.width, Math.max(0, x));
+      y = Math.min(this.info.height, Math.max(0, y));
+    }
+    const target = (x === t[0] && y === t[1] ? t : t.length > 2 ? [x, y, t[2]] : [x, y]) as [number, number];
+    const minZoom = this.clampZoom(-Infinity), maxZoom = this.clampZoom(Infinity);
+    this.vs = target === t && zoom === v.zoom && v.minZoom === minZoom && v.maxZoom === maxZoom
+      ? v : { ...v, target, zoom, minZoom, maxZoom };
+    this.deck.setProps({ viewState: this.vs });
+    this.opts.onView?.(this.view());
+  }
+}

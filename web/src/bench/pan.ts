@@ -3,13 +3,32 @@
 //   http     a fresh TileLayer on the same URLs (browser HTTP cache)
 //   resident the same TileLayer again (tiles already in deck's cache)
 // Records rAF frame intervals and deck render CPU time per phase, per-tile latency
-// (request -> decoded bitmap -> first frame drawn after it), plus the
-// server's read/encode times from Server-Timing.
+// (request -> decoded bitmap -> first frame drawn after it), the server's
+// read/encode times from Server-Timing, and per frame the share of on-screen
+// tiles shown at the target level ("sharp").
+// &tiles=<preset> picks the tile loading options (TILE_PRESETS, default tuned).
 
 import { Deck, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
-import { getBlob, postResults, type ImageInfo } from "./api";
+import { getBlob, postResults, type ImageInfo } from "../api";
 import { environment, nextFrame, percentiles } from "./env";
-import { fitZoom, makeTileLayer, TileStats } from "./tiles";
+import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats } from "../viewer/tiles";
+
+interface TileHeader { isLoaded: boolean; isSelected: boolean; bbox: { left: number; top: number; right: number; bottom: number } }
+
+/** Share of selected tiles intersecting the view that are loaded (1 = all sharp). */
+function sharpness(layer: unknown, view: [number, number, number, number]): number | null {
+  const ts = (layer as { state?: { tileset?: { selectedTiles?: TileHeader[] } } }).state?.tileset;
+  const tiles = ts?.selectedTiles;
+  if (!tiles?.length) return null;
+  const [vx0, vy0, vx1, vy1] = view;
+  let n = 0, ok = 0;
+  for (const t of tiles) {
+    const { left, right } = t.bbox, top = Math.min(t.bbox.top, t.bbox.bottom), bottom = Math.max(t.bbox.top, t.bbox.bottom);
+    if (left < vx1 && right > vx0 && top < vy1 && bottom > vy0) { n++; if (t.isLoaded) ok++; }
+  }
+  return n ? ok / n : null;
+}
+
 
 interface Phase { name: string; seconds: number; from: [number, number, number]; to: [number, number, number] }
 
@@ -41,10 +60,10 @@ function flight(info: ImageInfo, box: [number, number, number, number]): Phase[]
   let x = cx, y = cy;
   const legs: [string, number, number, number, number][] = [
     ["pan-z0", 0, 4, 1, 0], ["pan-z-2", -2, 4, 0, 1], ["pan-z-4", -4, 3, -1, 0],
-    ["pan-z+2", 2, 3, 0, -1],
+    ["pan-z+2", 2, 3, 0, -1], ["fling-z0", 0, 1.5, 1, 1], ["fling-z-1", -1, 1.5, -1, 0],
   ];
   for (const [name, z, sec, dx, dy] of legs) {
-    const d = (speed * sec) / 2 ** z;
+    const d = ((name.startsWith("fling") ? 4 * speed : speed) * sec) / 2 ** z;
     const nx = Math.min(bx1, Math.max(bx0, x + dx * d)), ny = Math.min(by1, Math.max(by0, y + dy * d));
     phases.push({ name: `jump-${name}`, seconds: 0, from: [x, y, z], to: [x, y, z] });
     phases.push({ name, seconds: sec, from: [x, y, z], to: [nx, ny, z] });
@@ -54,7 +73,9 @@ function flight(info: ImageInfo, box: [number, number, number, number]): Phase[]
   return phases;
 }
 
-export async function runPan(info: ImageInfo, hud: HTMLElement) {
+export async function runPan(info: ImageInfo, hud: HTMLElement, presetName = "tuned") {
+  const preset = TILE_PRESETS[presetName];
+  if (!preset) throw new Error(`no tile preset ${presetName}`);
   let stats = new TileStats();
   const vs = (x: number, y: number, z: number): OrthographicViewState =>
     ({ target: [x, y, 0], zoom: z });
@@ -81,7 +102,7 @@ export async function runPan(info: ImageInfo, hud: HTMLElement) {
   for (const run of ["cold", "http", "resident"]) {
     stats = new TileStats();
     if (run !== "resident") {
-      const layer = makeTileLayer(info, stats, bust);
+      const layer = makeTileLayer(info, stats, bust, preset);
       deck.setProps({ layers: [layer.clone({ id: `${layer.id}-${run}` })] });
     } else {
       const [layer] = deck.props.layers as ReturnType<typeof makeTileLayer>[];
@@ -91,6 +112,7 @@ export async function runPan(info: ImageInfo, hud: HTMLElement) {
     for (const ph of phases) {
       hud.textContent = `bench=pan ${info.id} ${run} ${ph.name}`;
       const dts: number[] = [];
+      const sharp: number[] = [];
       renderMs = [];
       const t0 = await nextFrame();
       let last = t0;
@@ -98,8 +120,11 @@ export async function runPan(info: ImageInfo, hud: HTMLElement) {
         const now = await nextFrame();
         const u = ph.seconds ? Math.min(1, (now - t0) / (ph.seconds * 1000)) : 1;
         const z = ph.from[2] + (ph.to[2] - ph.from[2]) * u;
-        deck.setProps({ viewState: vs(ph.from[0] + (ph.to[0] - ph.from[0]) * u,
-                                      ph.from[1] + (ph.to[1] - ph.from[1]) * u, z) });
+        const cx = ph.from[0] + (ph.to[0] - ph.from[0]) * u, cy = ph.from[1] + (ph.to[1] - ph.from[1]) * u;
+        deck.setProps({ viewState: vs(cx, cy, z) });
+        const hw = innerWidth / 2 / 2 ** z, hh = innerHeight / 2 / 2 ** z;
+        const sh = sharpness((deck.props.layers as unknown[])[0], [cx - hw, cy - hh, cx + hw, cy + hh]);
+        if (sh !== null) sharp.push(sh);
         if (now > t0) dts.push(now - last);
         last = now;
         if (u >= 1) break;
@@ -111,6 +136,8 @@ export async function runPan(info: ImageInfo, hud: HTMLElement) {
           render_cpu_ms: percentiles(renderMs),
           over_16_7ms: +(dts.filter((d) => d > 16.7 * 1.05).length / dts.length).toFixed(3),
           over_33_3ms: +(dts.filter((d) => d > 33.3 * 1.05).length / dts.length).toFixed(3),
+          sharp_mean: sharp.length ? +(sharp.reduce((a, b) => a + b, 0) / sharp.length).toFixed(3) : null,
+          sharp_full_frames: sharp.length ? +(sharp.filter((x) => x >= 1).length / sharp.length).toFixed(3) : null,
         });
       }
     }
@@ -120,7 +147,8 @@ export async function runPan(info: ImageInfo, hud: HTMLElement) {
     runs.push({ run, phases: phaseOut, tiles: stats.summary() });
   }
 
-  const result = { spike: "S2", bench: "pan", image: { id: info.id, kind: info.kind,
+  const result = { spike: "S2", bench: "pan", tiles: { preset: presetName, ...preset,
+    uploadsPerFrame: Number.isFinite(preset.uploadsPerFrame) ? preset.uploadsPerFrame : null }, image: { id: info.id, kind: info.kind,
     width: info.width, height: info.height, levels: info.levels.length }, tissue_box: box,
     environment: environment(gl), deck_version: (await import("@deck.gl/core")).VERSION, runs };
   const saved = await postResults("s2-pan", result);
