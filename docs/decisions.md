@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 5 done (2026-11-13); next is milestone 6. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 6 done (2026-11-15); next is milestone 7. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -101,6 +101,9 @@ later because the client depends only on the contract (D2).
   a store annotates, paired like label maps (explicit `--annotations-of`,
   else dotted name prefix, `slide` / `slide.cells`, else the only image if
   the recorded size matches); `--images DIR` also serves `*.ann.sqlite`.
+  1.4.0 (2026-11-15, milestone 6, additive): `GET /layers/{id}/lines`, a
+  layer's polylines whole (`line-layer` v1: object_id, group, coords),
+  capability `lines`.
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -224,8 +227,9 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   own slider range (5-100, 20-200, 100-1000 µm) and remembered value
   (20, 60, 300 µm). A single µm size failed both ways (50 µm is 107 px at
   1:1 and under 1 px at fit on the sample slide), and clamping it to a
-  screen-pixel range made the slider do nothing when zoomed out. Lines get
-  the same rule in milestone 6. Fill rate: 5M overlapping 6 px discs at
+  screen-pixel range made the slider do nothing when zoomed out. Line
+  widths (outlines, polylines) follow the same bands (0.5-10, 2-40,
+  10-200 µm; defaults 1.5, 6, 40). Fill rate: 5M overlapping 6 px discs at
   fit gave frame p95 34 ms; with the default bands, 60 fps at every zoom
   (frame p95 17 ms); the largest low-band sizes with millions of points
   are not measured. Hover and click pick by
@@ -234,6 +238,30 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   5M-point synthetic layer): group toggle 16 to 20 ms to screen, pick 3 to
   6 ms p95; first open 10.4 s (layer listing with counts 4.6 s, point
   buffer 5.7 s for 90 MB), later opens 0.8 s (server caches).
+- Polygons and polylines in the viewer (milestone 6, 2026-11-15), chosen
+  by the owner from options: from level 3 inward, polygon tiles are always
+  fetched on the level-3 grid (4096 px squares; the tiles in view plus a
+  one-tile ring) and merged on the client into one buffer set per group
+  with each polygon once (deduplicated by object id), rebuilt at most once
+  per frame when the set of tiles changes; large regions are never lost
+  and nothing is drawn twice. Rejected: a tile layer per level with an
+  owner tile (large regions vanish when their centre tile is off screen)
+  or with duplicates (double fill and outlines at tile borders). Zoomed
+  out, centroid tiles at the shown level, drawn as points sized by the
+  point bands. Each group is one SolidPolygonLayer (server triangles) and
+  one PathLayer (outline rings, sharing the vertex buffer), so toggles and
+  colours are prop changes. Style per layer: fill opacity (default 30 %),
+  outline on or off, width in µm per band. Polylines: the whole layer
+  (contract 1.4.0), one PathLayer per group. Picking covers fills,
+  outlines, lines and centres; a selection is outlined with its rings.
+  Measured (workstation, headless Firefox, 4 server CPUs, 5M points and
+  1M cells plus 200 regions, dense area): panning at 60 fps at every zoom
+  (frame p95 17 ms); at level 3 (41k polygons merged from 30 tiles) frame
+  p99 49 ms, 4 frames over 33 ms in a 3 s pan, when arriving tiles
+  trigger a rebuild (15 ms) and re-upload; cell group toggle 16 to 30 ms;
+  pick 5 to 7 ms p95. First zoomed-out view: 3.8 s for the one centroid
+  tile holding 1M cells (server query), level 6 view 1.4 s, zoomed-in
+  views 0.1 to 0.7 s.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
   S3 (2026-11-13): points use DataFilterExtension categories (group ids
   rebased to 0..k-1; at most 128 groups per layer). Polygons use one layer
@@ -356,7 +384,7 @@ baseline (D5).
 3. RGB tile server and pan/zoom viewer. Done 2026-11-13 (laptop check by the owner pending).
 4. Label maps with class toggles. Done 2026-11-13.
 5. Points: layer view, picking, attribute panel. Done 2026-11-13.
-6. Polygons with level of detail.
+6. Polygons with level of detail. Done 2026-11-15 (polylines included).
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
    undo and redo, commits with revisions.
 8. Multichannel.
@@ -390,3 +418,8 @@ baseline (D5).
   layer listing in milestone 5, which delays the first open of a slide).
   Cache them in the sidecar or compute them in the background. The first
   5M-point buffer takes 5.7 s; a disk cache would remove it.
+- Polygons (milestone 6): a zoomed-out centroid tile holding a whole large
+  layer takes 3.8 s (1M cells); a cached or precomputed coarse level, or
+  the density raster, would remove it. Merging tiles re-uploads the whole
+  visible set on each change (frame p99 49 ms at level 3 in a dense area);
+  incremental buffers would smooth it if real stores show it.

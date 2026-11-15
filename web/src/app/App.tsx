@@ -1,5 +1,5 @@
 // Application: image picker, pan/zoom viewer, sidebar (annotation layers,
-// label maps), inspector for selected points, status bar.
+// label maps), inspector for selected objects, status bar.
 // URL: /?image=<id>&x=&y=&z=#token=<token>  (position kept on reload; the
 // token stays in the fragment, which the browser never sends).
 
@@ -8,7 +8,7 @@ import { getJSON, type ImageInfo } from "@/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_STYLE, type LabelClass, type LabelStyle } from "@/viewer/labels";
-import type { PointPick } from "@/viewer/points";
+import type { ObjectPick } from "@/viewer/annstyle";
 import type { View, Viewer } from "@/viewer/viewer";
 import { useAnnotations, useObjects } from "./annotations";
 import { Inspector, objectKey } from "./Inspector";
@@ -50,8 +50,8 @@ export function App() {
   const [left, setLeft] = useState(true);
   const [right, setRight] = useState(false);
   const [tab, setTab] = useState<string | null>(null);
-  const [selection, setSelection] = useState<PointPick[]>([]);
-  const [hoverPick, setHoverPick] = useState<PointPick | null>(null);
+  const [selection, setSelection] = useState<ObjectPick[]>([]);
+  const [hoverPick, setHoverPick] = useState<ObjectPick | null>(null);
   const restore = useRef(initialView());
 
   useEffect(() => {
@@ -106,7 +106,7 @@ export function App() {
   const objects = useObjects(selection);
   const layerById = useMemo(() => new Map(ann.layers.map((l) => [l.info.id, l.info])), [ann.layers]);
   useEffect(() => {
-    viewer?.setPoints(ann.drawn);
+    viewer?.setAnnotations(ann.drawn);
   }, [viewer, ann.drawn]);
   useEffect(() => {
     viewer?.setSelection(selection);
@@ -116,11 +116,11 @@ export function App() {
     setHoverPick(null);
   }, [imageId]);
 
-  const onHover = useCallback((p: [number, number] | null, pickInfo: PointPick | null) => {
+  const onHover = useCallback((p: [number, number] | null, pickInfo: ObjectPick | null) => {
     setCursor(p);
     setHoverPick(pickInfo);
   }, []);
-  const onClick = useCallback((pk: PointPick | null, add: boolean) => {
+  const onClick = useCallback((pk: ObjectPick | null, add: boolean) => {
     if (!pk) {
       if (!add) setSelection([]);
       return;

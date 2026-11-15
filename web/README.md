@@ -7,12 +7,13 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 ## Layout
 
 - `index.html`, `src/app/`: the application: image picker, pan/zoom
-  viewer, sidebar with annotation layers (milestone 5) and label maps
-  (milestone 4), inspector for selected points, status bar with
-  coordinates, level, point and label under the cursor and scale bar.
+  viewer, sidebar with annotation layers (milestones 5 and 6) and label
+  maps (milestone 4), inspector for selected objects, status bar with
+  coordinates, level, object and label under the cursor and scale bar.
 - `src/viewer/`: the framework-free viewer core (deck.gl `Deck`,
-  OrthographicView, image tiles, label maps, point layers). The application
-  and the benches use it.
+  OrthographicView, image tiles, label maps; annotation sources for points,
+  polygons with level of detail and polylines, sharing `annstyle.ts`). The
+  application and the benches use it.
 - `src/components/ui/`: shadcn/ui components (copied, trimmed).
 - `bench.html`, `src/bench/`: spike benches S2, S3 and S5 (see `spikes/`).
 - `e2e/`: end-to-end smoke test in headless Firefox over WebDriver BiDi.

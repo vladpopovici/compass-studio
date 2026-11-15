@@ -8,7 +8,10 @@ coordinates, the view kept in the URL across a reload, image switching, the
 error shown without a token, and no console errors. If the first image has
 label maps: the panel, label values under the cursor, `l` and class toggles.
 If it has a point layer with at least 1000 points: hover, click selection
-and the inspector's attributes, Shift+click, Esc, and group toggles.
+and the inspector's attributes, Shift+click, Esc, and group toggles. If it
+has a polygon layer with at least 100 polygons: shapes zoomed in (hover,
+click, inspector, outline and fill controls) and centres zoomed out; with
+a polyline layer, its line width control.
 """
 
 import argparse
@@ -57,22 +60,22 @@ async def hover_label(ff) -> tuple[int, int, str] | None:
     return None
 
 
-POINT_HOVER = "document.querySelector('footer [title=\"Point under the cursor\"]').textContent"
+POINT_HOVER = "document.querySelector('footer [title=\"Annotation object under the cursor\"]').textContent"
 # the point layer with the most points
 LAYER = ("[...document.querySelectorAll('[data-points]')].filter(e => +e.dataset.points > 0)"
          ".sort((a, b) => b.dataset.points - a.dataset.points)[0]")
 
 
-async def hover_point(ff, avoid: str = "") -> tuple[int, int, str] | None:
+async def hover_point(ff, avoid: str = "", prefix: str = "") -> tuple[int, int, str] | None:
     for y in range(120, 620, 9):
         for x in range(320, 1300, 9):
             await ff.mouse([{"type": "pointerMove", "x": x, "y": y}])
             t = await ff.eval(POINT_HOVER)
-            if t and t != avoid:
+            if t and t != avoid and t.startswith(prefix):
                 # hover picks on the next frame: confirm at rest before using it
                 await asyncio.sleep(0.15)
                 t = await ff.eval(POINT_HOVER)
-                if t and t != avoid:
+                if t and t != avoid and t.startswith(prefix):
                     return x, y, t
     return None
 
@@ -104,7 +107,8 @@ async def check_points(ff, check, shots):
     insp = await ff.wait_for("(() => { const a = document.querySelector('aside[aria-label=Inspector]');"
                              " const t = a?.innerText ?? ''; return t.includes('Id') && !t.includes('Loading attributes')"
                              " ? t : null; })()", 15)
-    check("Group" in insp and "Position" in insp, f"click opens the inspector: {' '.join(insp.split())[:120]}")
+    check("Group" in insp and ("Position" in insp or "Centre" in insp),
+          f"click opens the inspector: {' '.join(insp.split())[:120]}")
     if shots:
         await ff.screenshot(shots / "6-selected.png")
     hit2 = await hover_point(ff, avoid=hit[2])
@@ -125,10 +129,70 @@ async def check_points(ff, check, shots):
     await asyncio.sleep(0.5)
     await ff.mouse([{"type": "pointerMove", "x": x + 1, "y": y}, {"type": "pointerMove", "x": x, "y": y}])
     await asyncio.sleep(0.3)
-    check(await ff.eval(POINT_HOVER) == "", "'None' hides every group (nothing to pick)")
+    t = await ff.eval(POINT_HOVER)
+    check(not t.startswith(hit[2].split(" › ")[0] + " ›"), f"'None' hides every group (nothing of the layer to pick: {t!r})")
     await ff.eval(f"[...{LAYER}.querySelectorAll('button')].find(b => b.textContent === 'All').click(), 1")
     await ff.key("]")  # close the inspector
     await ff.key("0")
+    await asyncio.sleep(0.5)
+
+
+POLYS = ("[...document.querySelectorAll('[data-polygons]')].filter(e => +e.dataset.polygons > 0)"
+         ".sort((a, b) => b.dataset.polygons - a.dataset.polygons)[0]")
+
+
+async def click_buttons(ff, text: str, but: str = ""):
+    """Click every layer card's button labelled `text`, except in the card `but`."""
+    await ff.eval(f"[...document.querySelectorAll('[data-layer]')].filter(c => c.dataset.layer !== '{but}')"
+                  f".forEach(c => [...c.querySelectorAll('button')].find(b => b.textContent === '{text}')?.click()), 1")
+    await asyncio.sleep(0.5)
+
+
+async def check_polygons(ff, check, shots):
+    """The largest polygon layer: shapes zoomed in, centres zoomed out."""
+    layer = await ff.eval(f"{POLYS}.dataset.layer")
+    name = await ff.eval(f"{POLYS}.querySelector('span.font-medium').textContent")
+    await click_buttons(ff, "None", but=layer)  # only this layer's objects can be picked
+    await ff.key("0")
+    await asyncio.sleep(1.5)
+    hint = f"{POLYS}.querySelector('[data-size-hint]').textContent"
+    h = await ff.eval(hint)
+    check("centres" in h, f"polygons drawn as centres at fit: {h}")
+    centre = await hover_point(ff, prefix=f"{name} ›")
+    check(centre is not None, f"hovering a polygon centre names it: {centre}")
+    if centre:  # zoom in around it (the wheel keeps the point under the cursor)
+        for _ in range(7):
+            await ff.wheel(centre[0], centre[1], -600)
+            await asyncio.sleep(0.4)
+        await asyncio.sleep(1.5)
+    await ff.wait_for(TILES_IDLE)
+    h = await ff.eval(hint)
+    check("centres" not in h, f"polygons drawn as shapes zoomed in: {h}")
+    check(await ff.eval(f"!!{POLYS}.querySelector('[aria-label=\"Fill opacity\"]') && "
+                        f"!!{POLYS}.querySelector('[aria-label=\"Outlines\"]')"), "fill and outline controls shown")
+    hit = await hover_point(ff, prefix=f"{name} ›")
+    check(hit is not None, f"hovering a polygon names it: {hit}")
+    if hit:
+        await ff.mouse([{"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}])
+        insp = await ff.wait_for("(() => { const a = document.querySelector('aside[aria-label=Inspector]');"
+                                 " const t = a?.innerText ?? ''; return t.includes('Centre') && !t.includes('Loading attributes')"
+                                 " ? t : null; })()", 15)
+        check("polygon" in insp, f"click selects the polygon: {' '.join(insp.split())[:120]}")
+        if shots:
+            await ff.screenshot(shots / "7-polygon.png")
+        await ff.key("\ue00c")  # Escape
+        await ff.key("]")
+    await ff.eval(f"{POLYS}.querySelector('[aria-label=\"Outlines\"]').click(), 1")
+    await asyncio.sleep(0.3)
+    check(not await ff.eval(f"{POLYS}.querySelector('[aria-label=\"Outlines\"]').checked"), "outline toggles off")
+    await ff.eval(f"{POLYS}.querySelector('[aria-label=\"Outlines\"]').click(), 1")
+    lines = await ff.eval("[...document.querySelectorAll('[data-lines]')].filter(e => +e.dataset.lines > 0).length")
+    if lines:
+        check(await ff.eval("[...document.querySelectorAll('[data-lines]')].filter(e => +e.dataset.lines > 0)"
+                            ".every(e => e.querySelector('[aria-label=\"Lines (µm)\"]'))"), f"line width shown for {lines} polyline layer(s)")
+    await ff.key("0")
+    await asyncio.sleep(1)
+    await click_buttons(ff, "All")
     await asyncio.sleep(0.5)
 
 
@@ -203,6 +267,12 @@ async def main() -> int:
             v0 = await url_view(ff)
         else:
             print(f"SKIP points (largest point layer has {most} points; needs 1000 to find one by hovering)")
+        polys = await ff.eval(f"+({POLYS}?.dataset.polygons ?? 0)")
+        if polys >= 100:
+            await check_polygons(ff, check, a.shots)
+            v0 = await url_view(ff)
+        else:
+            print(f"SKIP polygons (largest polygon layer has {polys} polygons; needs 100)")
         if "Labels 0" not in tabs:
             await check_labels(ff, check, a.shots)
             v0 = await url_view(ff)

@@ -22,7 +22,7 @@ export function StatusBar({ image, view, cursor, tiles, labels, point }: {
         <span title="Pyramid level shown">L{shownLevel(view.zoom, image.levels.length)}/{image.levels.length - 1}</span>
       )}
       {image?.mpp && <span title="Microns per level-0 px">{image.mpp.toPrecision(3)} µm/px</span>}
-      <span className="truncate text-foreground" title="Point under the cursor">{point}</span>
+      <span className="truncate text-foreground" title="Annotation object under the cursor">{point}</span>
       <span className="truncate text-foreground" title="Label under the cursor">{labels}</span>
       <span className="flex-1 truncate text-right" title="Tile loading">{tiles}</span>
       {bar && (

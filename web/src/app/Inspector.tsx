@@ -3,7 +3,7 @@
 import { X } from "lucide-react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
-import type { PointPick } from "@/viewer/points";
+import type { ObjectPick } from "@/viewer/annstyle";
 
 export type ObjectInfo = Schemas["ObjectInfo"];
 
@@ -18,8 +18,8 @@ export function objectKey(p: { layerId: string; objectId: number }) {
 }
 
 export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, onClose }: {
-  selection: PointPick[]; layers: Map<string, LayerInfo>; objects: Record<string, ObjectInfo | "error">;
-  mpp: number | null | undefined; onClear: () => void; onRemove: (p: PointPick) => void; onClose: () => void;
+  selection: ObjectPick[]; layers: Map<string, LayerInfo>; objects: Record<string, ObjectInfo | "error">;
+  mpp: number | null | undefined; onClear: () => void; onRemove: (p: ObjectPick) => void; onClose: () => void;
 }) {
   return (
     <>
@@ -31,7 +31,7 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!selection.length && (
-          <p className="p-2 text-muted-foreground">Click a point to inspect it; Shift+click adds to the selection.</p>
+          <p className="p-2 text-muted-foreground">Click an object to inspect it; Shift+click adds to the selection.</p>
         )}
         {selection.map((p) => {
           const layer = layers.get(p.layerId);
@@ -50,8 +50,8 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
                 <dt className="text-muted-foreground">Id</dt><dd className="font-mono tabular-nums">{p.objectId}</dd>
                 <dt className="text-muted-foreground">Layer</dt><dd className="truncate">{layer?.name ?? p.layerId}</dd>
                 <dt className="text-muted-foreground">Group</dt><dd className="truncate">{group?.name ?? p.group}</dd>
-                {o && o !== "error" && <><dt className="text-muted-foreground">Type</dt><dd>{o.type}</dd></>}
-                <dt className="text-muted-foreground">Position</dt>
+                <dt className="text-muted-foreground">Type</dt><dd>{o && o !== "error" ? o.type : p.kind}</dd>
+                <dt className="text-muted-foreground">{p.kind === "point" ? "Position" : "Centre"}</dt>
                 <dd className="font-mono tabular-nums">{fmt(p.x, 1)}, {fmt(p.y, 1)} px</dd>
                 {mpp && <><dt /><dd className="font-mono tabular-nums">{fmt(p.x * mpp, 1)}, {fmt(p.y * mpp, 1)} µm</dd></>}
               </dl>

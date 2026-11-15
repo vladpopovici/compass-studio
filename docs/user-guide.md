@@ -3,9 +3,9 @@
 CompassStudio shows COMPASS whole-slide images and their label maps in the
 browser. A local Python server reads the files; the browser only talks to
 that server. This guide covers every command and the viewer's controls. It
-describes what is implemented now (milestones 1 to 5: images, label maps and
-point annotations with picking); polygons, editing and multichannel images
-come later.
+describes what is implemented now (milestones 1 to 6: images, label maps,
+and point, polygon and polyline annotations with picking); editing and
+multichannel images come later.
 
 ## 1. Requirements
 
@@ -92,10 +92,11 @@ width is remembered in this browser.
 
 - Drag: pan.
 - Wheel: zoom around the cursor.
-- Hover: the status bar shows the cursor position, the point under it
-  (layer, group, id) and the label values under it.
-- Click a point: select it and show it in the inspector. Shift+click: add
-  or remove a point. Click on empty space: clear the selection.
+- Hover: the status bar shows the cursor position, the annotation object
+  under it (layer, group, id) and the label values under it.
+- Click a point, polygon or polyline: select it and show it in the
+  inspector. Shift+click: add or remove one. Click on empty space: clear
+  the selection.
 
 ### Keys
 
@@ -125,8 +126,8 @@ Keys do nothing while a text field or list has focus.
 ### Status bar
 
 From left to right: cursor in level-0 px, cursor in microns, the pyramid
-level being shown (`L2/7`), microns per pixel, the point under the cursor
-(`layer › group #id`), label values under the cursor, tile loading (tiles
+level being shown (`L2/7`), microns per pixel, the annotation object under the
+cursor (`layer › group #id`), label values under the cursor, tile loading (tiles
 loaded, requests in flight, latency) and a scale bar.
 
 ### Keeping your place
@@ -186,8 +187,8 @@ Class toggles take effect at once; nothing is reloaded from the server.
 An annotation store (`.ann.sqlite`, written by COMPASS tools) holds layers;
 each layer holds objects (points, polygons, lines) sorted into groups
 (classes). Coordinates are level-0 pixels of the slide. This version draws
-**points**; polygons and lines are listed but not drawn yet (milestone 6).
-The server never writes a store; unless `--read-only` is given it creates
+**points, polygons and polylines**; other types (point sets, circles) are
+listed but not drawn yet. The server never writes a store; unless `--read-only` is given it creates
 an edit database `<ID>.curation.sqlite` next to it (or in `--sidecar-dir`),
 used by editing in a later version.
 
@@ -205,40 +206,63 @@ not shown, and the server says so at start-up.
 In the sidebar's **Layers** tab, stores of the current slide, each with its
 layers:
 
-- Eye button: show or hide the layer's points.
+- Eye button: show or hide the layer.
 - Object counts per type; types not drawn yet are noted.
-- Size: point diameter in microns, drawn true to size. One size cannot
+- A line naming the current zoom band (below), and "polygons as centres"
+  when zoomed out.
+- Sizes and widths are in microns, drawn true to size. One size cannot
   suit every zoom, so there are three bands, chosen by the image resolution
-  on screen (µm per screen pixel), each with its own slider range and its
-  own remembered size; the slider shows the band you are in, and points
-  switch size when you zoom across a band:
+  on screen (µm per screen pixel). Each band has its own slider range and
+  keeps its own value; the sliders show the band you are in, and sizes
+  switch when you zoom across a band:
 
-  | Band | µm per screen px | Range | Default | On a 0.47 µm/px slide |
+  | Band | µm per screen px | On a 0.47 µm/px slide | Points / Centres | Lines |
   |---|---|---|---|---|
-  | high magnification | under 2.5 | 5–100 µm | 20 µm | levels 0–2 |
-  | medium magnification | 2.5–12 | 20–200 µm | 60 µm | levels 3–4 |
-  | low magnification | 12 and up | 100–1000 µm | 300 µm | levels 5+ and fit |
+  | high magnification | under 2.5 | levels 0–2 | 5–100 µm (20) | 0.5–10 µm (1.5) |
+  | medium magnification | 2.5–12 | levels 3–4 | 20–200 µm (60) | 2–40 µm (6) |
+  | low magnification | 12 and up | levels 5+ and fit | 100–1000 µm (300) | 10–200 µm (40) |
 
-  The line under the slider names the band and how many screen pixels a
-  point covers now. Points are at least 1 px across. Images without a
+  (defaults in brackets). Hover a slider for its range and how many screen
+  pixels it covers now. Everything is at least 1 px wide. Images without a
   calibration assume 0.5 µm/px.
-- Opacity slider.
+- Points: point diameter. Centres: the diameter of polygon centres drawn
+  when zoomed out (below).
+- Lines: polygon outline and polyline width.
+- Outline and Fill (polygons, when zoomed in): outlines on or off, and the
+  fill opacity (0: outlines only; default 30 %).
+- Opacity: the whole layer.
 - All / None: show or hide every group.
 - One row per group: checkbox (show or hide), colour swatch (click to pick
-  a colour) and the number of points.
+  a colour; points, fills, outlines and lines use it) and the number of
+  points and polylines.
 
-Point layers load when a slide opens (all points at once, a spinner shows
-while loading). The first load of a large layer after a server start takes
-a few seconds (5 million points: about 10 s); later loads come from the
-server's memory (under 1 s). Group toggles and colour changes apply at once.
-Layers with more than 128 groups draw every group (toggles are off).
+**Level of detail.** Polygons are drawn as shapes from level 3 inward
+(on a 0.47 µm/px slide, from about 1:8). Zoomed out further, each polygon
+is drawn as a dot at the centre of its bounding box, in its group colour
+and sized like points ("Centres"). Polygons are fetched by area as you
+pan and zoom (in 4096 px squares when zoomed in), so a layer of a million
+cells opens at once; the first fully zoomed-out view of a large layer can
+take a few seconds (one million cells: about 4 s).
+
+Point and polyline layers load when a slide opens (all at once, a spinner
+shows while loading). The first load of a large layer after a server start
+takes a few seconds (5 million points: about 10 s); later loads come from
+the server's memory (under 1 s). Group toggles and colour changes apply at
+once. Point layers with more than 128 groups draw every group (toggles are
+off).
+
+Drawing order: polygons of all layers, then polylines, then points.
 
 ### The inspector
 
-Shows each selected point: name (or id), id, layer, group, type, position
+Click a point, a polygon (inside it, or on its outline when the fill is
+off) or a polyline to select it; Shift+click adds or removes; click on
+empty space or press Esc to clear. Selected objects are outlined in black
+and white. The inspector shows each: name (or id), id, layer, group, type,
+position (points) or the centre of its bounding box (polygons, polylines)
 in pixels and microns, and its attributes (numbers stored with the object;
-fetched from the server when selected). "Clear" or Esc empties the
-selection; the cross on a card removes that point.
+fetched from the server when selected). "Clear" empties the selection; the
+cross on a card removes that object.
 
 ## 7. Test data
 
@@ -253,12 +277,13 @@ class table:
 `--from-level` is the pyramid level that is classified (default 3); lower is
 finer and slower.
 
-Synthetic annotation stores for testing (points, cells, regions). To show
-one on a real slide, give it the slide's size and a name that pairs:
+Synthetic annotation stores for testing (points, cells, regions and,
+with `--lines`, polylines). To show one on a real slide, give it the
+slide's size, its mpp and a name that pairs:
 
-    uv run compass-studio-synth ../data/m5 --name SLIDE.synth --no-arrow --width W --height H \
-        --points 300000 --cells 2000 --regions 3 --attrs 8
-    uv run compass-studio-serve --images ../data --annotations SLIDE.synth=../data/m5/SLIDE.synth.ann.sqlite --web ../web/dist
+    uv run compass-studio-synth ../data/m6 --name SLIDE.synth --no-arrow --width W --height H --mpp MPP \
+        --points 300000 --cells 300000 --regions 30 --region-radius-px 800 6000 --lines 60 --attrs 8
+    uv run compass-studio-serve --images ../data --annotations SLIDE.synth=../data/m6/SLIDE.synth.ann.sqlite --web ../web/dist
 
 (`W` and `H` are the slide's size in pixels, printed by the server at
 start-up.) Run `uv run compass-studio-synth --help` for all options (image
@@ -277,9 +302,10 @@ Without any slide at hand:
   TypeScript API types from `contract/openapi.yaml`.
 - Server and contract tests: in `server/`, `uv run pytest`.
 - End-to-end smoke test (headless Firefox; a server running with
-  `--web ../web/dist` and at least two images; it also checks label maps and
-  points when the first image has them, points only with a layer of 1,000
-  points or more):
+  `--web ../web/dist` and at least two images; it also checks label maps,
+  points, polygons and polylines when the first image has them: points
+  with a layer of 1,000 points or more, polygons with 100 or more, such as
+  the store above):
 
       uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR]
 

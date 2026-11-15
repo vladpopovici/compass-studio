@@ -6,7 +6,9 @@ import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState 
 import type { ImageInfo } from "../api";
 import type { Layer } from "@deck.gl/core";
 import { LabelSource, type LabelStyle } from "./labels";
-import { ASSUMED_MPP, bandAt, selectionLayers, type BandId, type PointPick, type PointSource, type PointStyle } from "./points";
+import {
+  ASSUMED_MPP, bandAt, selectionLayers, type AnnSource, type AnnStyle, type BandId, type ObjectPick,
+} from "./annstyle";
 import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats, type TileOptions } from "./tiles";
 
 export interface View {
@@ -22,10 +24,10 @@ export interface View {
 
 export interface ViewerOptions {
   onView?: (v: View) => void;
-  /** cursor in level-0 px, and the point under it */
-  onHover?: (p: [number, number] | null, pick: PointPick | null) => void;
-  /** click: the point under the cursor (null: none); `add` with Shift */
-  onClick?: (pick: PointPick | null, add: boolean) => void;
+  /** cursor in level-0 px, and the annotation object under it */
+  onHover?: (p: [number, number] | null, pick: ObjectPick | null) => void;
+  /** click: the object under the cursor (null: none); `add` with Shift */
+  onClick?: (pick: ObjectPick | null, add: boolean) => void;
   tiles?: TileOptions;
   /** zoom limits relative to 1:1; the lower limit is also bounded by fit - 1 */
   maxZoom?: number;
@@ -44,10 +46,11 @@ export class Viewer {
   private resize: ResizeObserver;
   private imageLayer: Layer | null = null;
   private labels = new Map<string, { source: LabelSource; style: LabelStyle }>();
-  private points: { source: PointSource; style: PointStyle }[] = [];
-  private selection: PointPick[] = [];
-  /** point size band at the current zoom; layers are rebuilt when it changes */
+  private annotations: { source: AnnSource; style: AnnStyle }[] = [];
+  private selection: ObjectPick[] = [];
+  /** size band at the current zoom; layers are rebuilt when it changes */
   private band: BandId | null = null;
+  private renderQueued = false;
 
   constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
     this.deck = new Deck({
@@ -59,8 +62,8 @@ export class Viewer {
         this.setViewState(viewState as OrthographicViewState);
       },
       onHover: (info) => this.opts.onHover?.(info.coordinate ? [info.coordinate[0], info.coordinate[1]] : null,
-                                              this.pointPick(info.layer?.id, info.index)),
-      onClick: (info, ev) => this.opts.onClick?.(this.pointPick(info.layer?.id, info.index),
+                                              this.objectPick(info.layer?.id, info.index)),
+      onClick: (info, ev) => this.opts.onClick?.(this.objectPick(info.layer?.id, info.index),
                                                  !!(ev.srcEvent as MouseEvent | undefined)?.shiftKey),
       onAfterRender: () => {
         this.frames++;
@@ -125,28 +128,37 @@ export class Viewer {
     return out;
   }
 
-  /** Point layers drawn above the label maps, bottom first. */
-  setPoints(entries: { source: PointSource; style: PointStyle }[]) {
-    this.points = entries;
+  /** Annotation sources drawn above the label maps, bottom first. */
+  setAnnotations(entries: { source: AnnSource; style: AnnStyle }[]) {
+    const known = new Set(this.annotations.map((e) => e.source));
+    this.annotations = entries;
+    for (const { source } of entries) {
+      if (known.has(source)) continue;
+      source.onChange = () => this.queueRender();
+      if (this.info) source.setView?.(this.view(), this.info);
+    }
     this.render();
   }
 
-  /** Selected points, ringed. */
-  setSelection(picks: PointPick[]) {
+  /** Selected objects, outlined. */
+  setSelection(picks: ObjectPick[]) {
     this.selection = picks;
     this.render();
   }
 
-  private pointPick(layerId: string | undefined, index: number): PointPick | null {
-    if (!layerId || index < 0) return null;
-    const e = this.points.find((p) => `points-${p.source.id}` === layerId);
-    return e ? e.source.pick(index) : null;
+  private objectPick(deckLayerId: string | undefined, index: number): ObjectPick | null {
+    if (!deckLayerId || index < 0) return null;
+    for (const { source } of this.annotations) {
+      const p = source.pick(deckLayerId, index);
+      if (p) return p;
+    }
+    return null;
   }
 
-  /** Point under a canvas position (CSS px), as hover would pick it; for measurements. */
-  pickAt(x: number, y: number): PointPick | null {
+  /** Object under a canvas position (CSS px), as hover would pick it; for measurements. */
+  pickAt(x: number, y: number): ObjectPick | null {
     const info = this.deck.pickObject({ x, y, radius: 0 });
-    return info ? this.pointPick(info.layer?.id, info.index) : null;
+    return info ? this.objectPick(info.layer?.id, info.index) : null;
   }
 
   labelSource(id: string): LabelSource | undefined {
@@ -156,14 +168,24 @@ export class Viewer {
   private render() {
     const layers: Layer[] = this.imageLayer ? [this.imageLayer] : [];
     for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
-    const mpp = this.info?.mpp || ASSUMED_MPP;
-    const band = (this.band = bandAt(mpp, this.vs.zoom as number).id);
-    for (const { source, style } of this.points) if (source.loaded) layers.push(source.layer(style, mpp, band));
+    const mpp = this.info?.mpp || ASSUMED_MPP, zoom = this.vs.zoom as number;
+    const band = (this.band = bandAt(mpp, zoom).id);
+    for (const { source, style } of this.annotations) layers.push(...source.layers({ style, mpp, band, zoom }));
     if (this.selection.length) {
-      const size = Math.max(...this.points.map((p) => p.style.sizes[band]), 0);
+      const size = Math.max(...this.annotations.map((p) => p.style.sizes[band]), 0);
       layers.push(...selectionLayers(this.selection, size, mpp));
     }
     this.deck.setProps({ layers });
+  }
+
+  /** Render on the next frame (sources changing data in bursts). */
+  private queueRender() {
+    if (this.renderQueued) return;
+    this.renderQueued = true;
+    requestAnimationFrame(() => {
+      this.renderQueued = false;
+      this.render();
+    });
   }
 
   view(): View {
@@ -204,6 +226,7 @@ export class Viewer {
 
   destroy() {
     for (const l of this.labels.values()) l.source.destroy();
+    for (const a of this.annotations) a.source.destroy?.();
     this.resize.disconnect();
     this.deck.finalize();
   }
@@ -238,7 +261,8 @@ export class Viewer {
     this.vs = target === t && zoom === v.zoom && v.minZoom === minZoom && v.maxZoom === maxZoom
       ? v : { ...v, target, zoom, minZoom, maxZoom };
     this.deck.setProps({ viewState: this.vs });
-    if (this.points.length && bandAt(this.info?.mpp || ASSUMED_MPP, zoom).id !== this.band) this.render();
+    if (this.info) for (const { source } of this.annotations) source.setView?.(this.view(), this.info);
+    if (this.annotations.length && bandAt(this.info?.mpp || ASSUMED_MPP, zoom).id !== this.band) this.render();
     this.opts.onView?.(this.view());
   }
 }
