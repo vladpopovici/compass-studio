@@ -27,12 +27,14 @@ from .triangulate import triangulate
 
 POLYGON = TYPE_CODE["POLYGON"]
 POINT = TYPE_CODE["POINT"]
+POLYLINE = TYPE_CODE["POLYLINE"]
 CODE_TYPE = {v: k.lower() for k, v in TYPE_CODE.items()}
 ID_LIMIT = 2**53
 
 POINT_LAYER_VERSION = "1"
 POLYGON_TILE_VERSION = "1"
 CENTROID_TILE_VERSION = "1"
+LINE_LAYER_VERSION = "1"
 
 
 class SchemaError(ValueError):
@@ -189,6 +191,26 @@ class AnnotationStore:
                f"GROUP BY o.object_id")
         return _columns(self._conn.execute(sql, (POINT,)).fetchall())
 
+    def polylines(self, layer_id: int):
+        """Whole polyline layer: (ids int64, group ids int64, coords float64
+        (n_vertices, 2), starts (n + 1,) vertex offsets)."""
+        sql = (f"SELECT o.object_id, MIN(og.group_id), o.wkb FROM objects o "
+               f"JOIN object_groups og ON og.object_id = o.object_id "
+               f"WHERE o.type_code = ? AND og.group_id IN ({self._layer_groups(layer_id)}) "
+               f"GROUP BY o.object_id")
+        rows = self._conn.execute(sql, (POLYLINE,)).fetchall()
+        n = len(rows)
+        ids = np.fromiter((r[0] for r in rows), np.int64, n)
+        gids = np.fromiter((r[1] for r in rows), np.int64, n)
+        if not n:
+            return ids, gids, np.zeros((0, 2)), np.zeros(1, np.int64)
+        geoms = shapely.from_wkb([r[2] for r in rows])
+        if not (shapely.get_type_id(geoms) == 1).all():
+            raise ValueError("polylines must be single LineStrings")
+        xy = shapely.get_coordinates(geoms)
+        starts = np.concatenate([[0], np.cumsum(shapely.get_num_coordinates(geoms))])
+        return ids, gids, xy, starts
+
     def features(self, layer_id: int, object_ids: list[int]) -> list[dict]:
         """GeoJSON features of the given objects of one layer."""
         q = ",".join("?" * len(object_ids))
@@ -313,6 +335,18 @@ def point_layer(ids: np.ndarray, groups: np.ndarray, xy: np.ndarray, **meta) -> 
          pa.array(xy[:, 1].astype(np.float32)), pa.array(groups, pa.uint16())],
         schema=pa.schema([("object_id", pa.int64()), ("x", pa.float32()), ("y", pa.float32()),
                           ("group", pa.uint16())], metadata=_meta("point-layer", POINT_LAYER_VERSION, meta)))
+
+
+def line_layer(ids: np.ndarray, groups: np.ndarray, xy: np.ndarray, starts: np.ndarray,
+               **meta) -> pa.RecordBatch:
+    """line-layer v1: object_id int64, group uint16, coords list<float32> (x, y interleaved)."""
+    coords = pa.ListArray.from_arrays(pa.array((starts * 2).astype(np.int32)),
+                                      pa.array(xy.astype(np.float32).ravel()))
+    return pa.RecordBatch.from_arrays(
+        [pa.array(ids, pa.int64()), pa.array(groups, pa.uint16()), coords],
+        schema=pa.schema([("object_id", pa.int64()), ("group", pa.uint16()),
+                          ("coords", pa.list_(pa.float32()))],
+                         metadata=_meta("line-layer", LINE_LAYER_VERSION, meta)))
 
 
 def polygon_tile(batch: PolygonBatch, groups: np.ndarray,

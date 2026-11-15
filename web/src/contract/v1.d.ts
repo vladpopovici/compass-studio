@@ -215,6 +215,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/layers/{layer_id}/lines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * All polyline objects of a layer
+         * @description One Arrow IPC stream, schema `line-layer` v1. Empty for layers without
+         *     polylines. `ETag` changes with the layer's revision. Since 1.4.0
+         *     (capability `lines`).
+         */
+        get: operations["getLayerLines"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/layers/{layer_id}/tiles/{level}/{col}/{row}": {
         parameters: {
             query?: never;
@@ -442,7 +466,8 @@ export interface components {
             /**
              * @description Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
              *     annotations, events, edit (present when at least one store has a
-             *     sidecar). Clients ignore unknown values.
+             *     sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0.
+             *     Clients ignore unknown values.
              */
             capabilities: string[];
             /** @description Binary schema name to supported versions. */
@@ -937,6 +962,29 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Point buffer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/vnd.apache.arrow.stream": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getLayerLines: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Polyline buffer */
             200: {
                 headers: {
                     [name: string]: unknown;

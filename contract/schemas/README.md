@@ -10,6 +10,7 @@ conformance tests check the server against these files.
 | `point-layer` | 1 | `GET /layers/{id}/points` |
 | `polygon-tile` | 1 | `GET /layers/{id}/tiles/{level}/{col}/{row}` up to `polygon_max_level` |
 | `centroid-tile` | 1 | the same endpoint above `polygon_max_level` |
+| `line-layer` | 1 | `GET /layers/{id}/lines` (since API 1.4.0) |
 
 Rules:
 

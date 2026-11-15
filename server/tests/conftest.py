@@ -16,7 +16,7 @@ HOST = "127.0.0.1:8765"
 def synth_store(tmp_path_factory):
     d = tmp_path_factory.mktemp("store")
     generate(d, "t", Params(width=4096, height=2048, points=500, cells=400, regions=3,
-                            region_vertices=(60, 120), region_radius_px=(100.0, 300.0), attrs=6),
+                            region_vertices=(60, 120), region_radius_px=(100.0, 300.0), attrs=6, lines=4),
              arrow=False, log=lambda m: None)
     return d / "t.ann.sqlite"
 

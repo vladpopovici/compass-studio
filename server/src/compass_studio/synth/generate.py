@@ -12,7 +12,8 @@ with spatially clustered classes. Three layers:
 
 - ``points``: POINT objects (cell centroids), one group per class;
 - ``cells``: small star-shaped POLYGONs, 8 to 32 vertices;
-- ``regions``: large star-shaped POLYGONs, hundreds to thousands of vertices.
+- ``regions``: large star-shaped POLYGONs, hundreds to thousands of vertices;
+- ``lines`` (only with ``lines`` > 0): POLYLINEs, smooth random walks.
 
 All polygons are star-shaped around their centre, hence valid and simple.
 Cells may overlap each other; regions overlap cells.
@@ -48,6 +49,10 @@ class Params:
     cell_vertices: tuple[int, int] = (8, 32)
     region_radius_px: tuple[float, float] = (500.0, 8000.0)
     region_vertices: tuple[int, int] = (500, 5000)
+    lines: int = 0
+    line_classes: int = 3
+    line_vertices: tuple[int, int] = (20, 200)
+    line_step_px: float = 40.0
     attrs: int = 40
     attrs_per_object: float = 4.0
     order: str = "spatial"  # object_id order within a layer: spatial | random
@@ -131,7 +136,7 @@ class Layer:
     classes: int
     group: np.ndarray             # class index per object
     xy: np.ndarray | None = None  # points
-    rings: list[np.ndarray] | None = None  # polygons, each (nv, 2), not closed
+    rings: list[np.ndarray] | None = None  # polygons (not closed) or polylines, each (nv, 2)
 
 
 def _points(rng, tissue, p: Params) -> Layer:
@@ -168,6 +173,20 @@ def _regions(rng, tissue, p: Params) -> Layer:
                  _classes(rng, centres, p.region_classes, p), rings=rings)
 
 
+def _lines(rng, tissue, p: Params) -> Layer:
+    starts = _sample_positions(rng, p.lines, tissue, p)
+    nv = rng.integers(p.line_vertices[0], p.line_vertices[1] + 1, p.lines)
+    rings = []
+    for i in range(p.lines):
+        turn = np.cumsum(rng.normal(0.0, 0.25, int(nv[i])))
+        turn += rng.random() * 2 * np.pi
+        steps = p.line_step_px * np.column_stack([np.cos(turn), np.sin(turn)])
+        xy = starts[i] + np.cumsum(steps, axis=0)
+        rings.append(np.clip(xy, 0, [p.width - 1, p.height - 1]))
+    return Layer("lines", TYPE_CODE["POLYLINE"], p.line_classes,
+                 _classes(rng, starts, p.line_classes, p), rings=rings)
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -181,6 +200,10 @@ def _wkb_and_bounds(layer: Layer) -> tuple[list[bytes], np.ndarray]:
     if layer.xy is not None:
         geoms = shapely.points(layer.xy)
         return list(shapely.to_wkb(geoms)), np.hstack([layer.xy, layer.xy])
+    if layer.type_code == TYPE_CODE["POLYLINE"]:
+        geoms = [shapely.LineString(r) for r in layer.rings]
+        b = np.array([[r[:, 0].min(), r[:, 1].min(), r[:, 0].max(), r[:, 1].max()] for r in layer.rings])
+        return list(shapely.to_wkb(geoms)), b.reshape(-1, 4)
     n = len(layer.rings)
     wkb: list[bytes] = [b""] * n
     bounds = np.empty((n, 4))
@@ -296,7 +319,9 @@ def write_arrow(stem: Path, layers: list[Layer], p: Params) -> None:
         common = {"object_id": pa.array(np.arange(oid, oid + n, dtype=np.uint32)),
                   "layer": pa.array(np.full(n, lid, np.uint8)),
                   "group": pa.array((l.group + base).astype(np.uint16))}
-        if l.xy is not None:
+        if l.type_code == TYPE_CODE["POLYLINE"]:
+            pass  # the spike files hold points and polygons only
+        elif l.xy is not None:
             point_tables.append(pa.table({**common,
                                           "x": pa.array(l.xy[:, 0].astype(np.float32)),
                                           "y": pa.array(l.xy[:, 1].astype(np.float32))}))
@@ -326,7 +351,7 @@ def generate(out_dir: Path, name: str, p: Params, sqlite: bool = True, arrow: bo
     tissue = _smooth_field(rng, 30, (0.04, 0.15))
     tissue = np.where(tissue > 0.35, tissue, 0.0)
     layers = []
-    for make, count in ((_points, p.points), (_cells, p.cells), (_regions, p.regions)):
+    for make, count in ((_points, p.points), (_cells, p.cells), (_regions, p.regions), (_lines, p.lines)):
         if count:
             layers.append(make(rng, tissue, p))
             log(f"generated {layers[-1].name}: {count}")

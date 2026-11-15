@@ -118,7 +118,7 @@ def check_arrow(r, expect: str | None = None) -> pa.Table:
 def api(tmp_path_factory):
     d = tmp_path_factory.mktemp("conf")
     generate(d, "c", Params(width=3000, height=1500, points=300, cells=200, regions=2,
-                            region_vertices=(40, 80), region_radius_px=(80.0, 200.0), attrs=4),
+                            region_vertices=(40, 80), region_radius_px=(80.0, 200.0), attrs=4, lines=5),
              arrow=False, log=lambda m: None)
     ds = Dataset.open("conf", d / "c.ann.sqlite", d / "conf.curation.sqlite")
     labels = SyntheticLabels(2000, 1000)
@@ -183,6 +183,9 @@ def test_scenario(api):
     a.get("/layers/nope")
 
     check_arrow(a.get(f"/layers/{points['id']}/points"), "point-layer")
+    lines = next(lv for lv in layers if lv["counts"].get("polyline"))
+    lt = check_arrow(a.get(f"/layers/{lines['id']}/lines"), "line-layer")
+    assert lt.num_rows == 5 and len(lt["coords"][0]) >= 40
     t = check_arrow(a.get(f"/layers/{cells['id']}/tiles/0/0/0"), "polygon-tile")
     check_arrow(a.get(f"/layers/{cells['id']}/tiles/{cells['polygon_max_level'] + 1}/0/0"), "centroid-tile")
     a.get(f"/layers/{cells['id']}/tiles/0/99/0")

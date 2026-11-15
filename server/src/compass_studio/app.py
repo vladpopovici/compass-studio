@@ -41,11 +41,12 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
 from .annot.sidecar import Conflict, Sidecar
-from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, POINT_LAYER_VERSION, POLYGON_TILE_VERSION,
-                          AnnotationStore, centroid_tile, encode_ipc, point_layer, polygon_tile)
+from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, LINE_LAYER_VERSION, POINT_LAYER_VERSION,
+                          POLYGON_TILE_VERSION, AnnotationStore, centroid_tile, encode_ipc, line_layer,
+                          point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.3.0"
+API_VERSION = "1.4.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
@@ -97,7 +98,7 @@ class Dataset:
     sidecar: Sidecar | None = None
     view: AnnotationStore | None = None          # read-only connections to the sidecar file
     edit_pool: ThreadPoolExecutor | None = None
-    cache: dict = field(default_factory=dict)    # (layer id, revision) -> point-layer bytes
+    cache: dict = field(default_factory=dict)    # (layer id, kind, revision) -> whole-layer Arrow bytes
     aligned_to: str | None = None                # id of the image it annotates
 
     def size(self) -> tuple[int, int] | None:
@@ -168,12 +169,12 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
     @app.get("/api/v1/info")
     def info():
-        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "events"]
+        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "lines", "events"]
         if any(d.sidecar for d in datasets.values()):
             caps.append("edit")
         return {"api_version": API_VERSION, "capabilities": caps,
                 "schemas": {"point-layer": [POINT_LAYER_VERSION], "polygon-tile": [POLYGON_TILE_VERSION],
-                            "centroid-tile": [CENTROID_TILE_VERSION]}}
+                            "centroid-tile": [CENTROID_TILE_VERSION], "line-layer": [LINE_LAYER_VERSION]}}
 
     # -- images -----------------------------------------------------------
 
@@ -305,25 +306,40 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         ds, view, lid, editable = _resolve(layer_id)
         return await in_pool(lambda: _layer_info(ds, view, lid, editable))
 
-    @app.get("/api/v1/layers/{layer_id}/points")
-    async def layer_points(layer_id: str):
+    async def _whole_layer(kind: str, layer_id: str, build) -> Response:
+        """A whole-layer Arrow payload (points, lines), cached in memory per
+        (layer, kind, revision). ``build(view, lid, meta) -> RecordBatch``."""
         ds, view, lid, editable = _resolve(layer_id)
         rev = ds.revision() if editable else 0
 
         def work():
-            key = (layer_id, rev)
+            key = (layer_id, kind, rev)
             body = ds.cache.get(key)
             if body is None:
-                ids, gids, xy = view.points(lid)
-                body = encode_ipc(point_layer(ids, view.group_index(lid, gids), xy,
-                                              layer_id=layer_id, revision=rev))
-                for k in [k for k in ds.cache if k[0] == layer_id]:
+                body = encode_ipc(build(view, lid, dict(layer_id=layer_id, revision=rev)))
+                for k in [k for k in ds.cache if k[:2] == (layer_id, kind)]:
                     del ds.cache[k]
                 ds.cache[key] = body
             return body
         body = await in_pool(work)
         return Response(body, media_type=ARROW, headers={"ETag": f'"{layer_id}@{rev}"',
                                                          "Cache-Control": "private, no-cache"})
+
+    def _points_batch(view, lid, meta):
+        ids, gids, xy = view.points(lid)
+        return point_layer(ids, view.group_index(lid, gids), xy, **meta)
+
+    def _lines_batch(view, lid, meta):
+        ids, gids, xy, starts = view.polylines(lid)
+        return line_layer(ids, view.group_index(lid, gids), xy, starts, **meta)
+
+    @app.get("/api/v1/layers/{layer_id}/points")
+    async def layer_points(layer_id: str):
+        return await _whole_layer("points", layer_id, _points_batch)
+
+    @app.get("/api/v1/layers/{layer_id}/lines")
+    async def layer_lines(layer_id: str):
+        return await _whole_layer("lines", layer_id, _lines_batch)
 
     @app.get("/api/v1/layers/{layer_id}/tiles/{level}/{col}/{row}")
     async def layer_tile(layer_id: str, level: int, col: int, row: int):

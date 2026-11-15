@@ -33,8 +33,9 @@ def test_security(client):
 
 def test_info(client):
     i = client.get("/api/v1/info").json()
-    assert i["api_version"] == "1.3.0" and "edit" in i["capabilities"]
-    assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"]}
+    assert i["api_version"] == "1.4.0" and "lines" in i["capabilities"] and "edit" in i["capabilities"]
+    assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"],
+                            "line-layer": ["1"]}
 
 
 def test_image_tiles(client):
@@ -71,13 +72,19 @@ def test_layers_points_tiles(client):
     stores = client.get("/api/v1/stores").json()
     assert stores[0]["id"] == "synth" and stores[0]["editable"] and stores[0]["image_width"] == 4096
     layers = {lv["id"]: lv for lv in client.get("/api/v1/layers").json()}
-    assert set(layers) == {"synth:1", "synth:2", "synth:3"}
+    assert set(layers) == {"synth:1", "synth:2", "synth:3", "synth:4"}
     assert layers["synth:1"]["counts"] == {"point": 500} and layers["synth:2"]["counts"] == {"polygon": 400}
     assert [g["index"] for g in layers["synth:2"]["groups"]] == list(range(8))
 
     pts = arrow(client.get("/api/v1/layers/synth:1/points"))
     assert pts.num_rows == 500 and pts.schema.field("object_id").type == pa.int64()
     assert pts.schema.metadata[b"schema"] == b"point-layer" and max(pts["group"].to_pylist()) < 8
+
+    assert layers["synth:4"]["counts"] == {"polyline": 4}
+    ln = arrow(client.get("/api/v1/layers/synth:4/lines"))
+    assert ln.schema.metadata[b"schema"] == b"line-layer" and ln.num_rows == 4
+    assert all(len(c) >= 40 and len(c) % 2 == 0 for c in ln["coords"].to_pylist())
+    assert arrow(client.get("/api/v1/layers/synth:2/lines")).num_rows == 0
 
     # polygon tiles: every cell appears in at least one tile of the level-0 grid
     seen = set()
