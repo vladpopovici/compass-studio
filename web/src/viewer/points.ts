@@ -13,6 +13,13 @@
 // Colours live in their own attribute buffer; a colour change rewrites and
 // re-uploads only that buffer (a new descriptor object for `getFillColor`,
 // plus `colorVersion` in updateTriggers).
+//
+// Size: a diameter in microns, drawn true to size. One µm size cannot suit
+// every zoom (on a 0.47 µm/px slide, 50 µm is 107 px at 1:1 and under 1 px
+// at fit), so the size is chosen per resolution band (SIZE_BANDS, by the
+// µm per screen pixel on screen): each band has its own slider range and
+// remembers its own value, and the size switches when the zoom crosses
+// into another band. Lines get the same rule in milestone 6.
 
 import { DataFilterExtension } from "@deck.gl/extensions";
 import { ScatterplotLayer } from "@deck.gl/layers";
@@ -25,12 +32,48 @@ export interface PointStyle {
   hidden: number[];
   /** "#rrggbb" per group index; missing entries use the default palette */
   colors: Record<number, string>;
-  /** radius in screen px */
-  size: number;
+  /** diameter in microns, per resolution band */
+  sizes: Record<BandId, number>;
   opacity: number;
 }
 
-export const DEFAULT_POINT_STYLE: PointStyle = { visible: true, hidden: [], colors: {}, size: 3, opacity: 0.9 };
+export type BandId = "high" | "medium" | "low";
+
+export interface SizeBand {
+  id: BandId;
+  /** the band applies while µm per screen pixel is below this */
+  below: number;
+  /** slider range and default, µm */
+  min: number;
+  max: number;
+  def: number;
+}
+
+/** Resolution bands, finest first. On a 0.47 µm/px slide: high = levels 0
+ * to 2, medium = 3 and 4, low = 5 and above (and the fitted view). */
+export const SIZE_BANDS: SizeBand[] = [
+  { id: "high", below: 2.5, min: 5, max: 100, def: 20 },
+  { id: "medium", below: 12, min: 20, max: 200, def: 60 },
+  { id: "low", below: Infinity, min: 100, max: 1000, def: 300 },
+];
+
+export const DEFAULT_POINT_STYLE: PointStyle = {
+  visible: true, hidden: [], colors: {}, opacity: 0.9,
+  sizes: Object.fromEntries(SIZE_BANDS.map((b) => [b.id, b.def])) as Record<BandId, number>,
+};
+
+/** used when the image has no calibration */
+export const ASSUMED_MPP = 0.5;
+
+/** Microns per screen pixel at a zoom (deck zoom: 0 = 1:1, -1 = 1:2). */
+export function umPerScreenPx(mpp: number, zoom: number): number {
+  return mpp / 2 ** zoom;
+}
+
+export function bandAt(mpp: number, zoom: number): SizeBand {
+  const s = umPerScreenPx(mpp, zoom);
+  return SIZE_BANDS.find((b) => s < b.below) ?? SIZE_BANDS[SIZE_BANDS.length - 1];
+}
 
 // Okabe-Ito, then Tableau 10 (colour-blind friendly first)
 export const GROUP_PALETTE = [
@@ -39,8 +82,6 @@ export const GROUP_PALETTE = [
 ];
 
 export const MAX_FILTER_GROUPS = 128;
-/** points keep their full size down to zoom 1 / SHRINK_BELOW, then shrink with the slide */
-const SHRINK_BELOW = 4;
 
 export function groupColor(style: PointStyle, index: number): string {
   return style.colors[index] ?? GROUP_PALETTE[index % GROUP_PALETTE.length];
@@ -175,7 +216,8 @@ export class PointSource {
     return this.data;
   }
 
-  layer(style: PointStyle) {
+  /** `mpp`: microns per level-0 pixel (positions are level-0 px); `band`: the current resolution band. */
+  layer(style: PointStyle, mpp: number, band: BandId) {
     this.updateColors(style);
     const filter = this.info.groups.length <= MAX_FILTER_GROUPS;
     const hidden = new Set(style.hidden);
@@ -188,13 +230,10 @@ export class PointSource {
       pickable: true,
       autoHighlight: true,
       highlightColor: [255, 255, 255, 220],
-      // `size` screen px from 1:4 zoom inward; zoomed out further, points
-      // shrink with the slide (to 1 px), which keeps millions of
-      // overlapping points from saturating the GPU at fit (fill rate)
+      // common units are level-0 px: true size in µm; at least 1 px across
       radiusUnits: "common",
-      getRadius: style.size * SHRINK_BELOW,
-      radiusMinPixels: 1,
-      radiusMaxPixels: style.size,
+      getRadius: style.sizes[band] / 2 / mpp,
+      radiusMinPixels: 0.5,
       stroked: false,
       updateTriggers: { getFillColor: this.colorVersion },
       ...(filter ? { extensions: EXTENSIONS, filterCategories: shown } : {}),
@@ -202,17 +241,19 @@ export class PointSource {
   }
 }
 
-/** Ring around selected points (screen px, drawn above the point layers):
- * a dark ring under a white one, visible on light and dark points alike. */
-export function selectionLayers(picks: PointPick[], radius: number) {
-  const r = Math.max(radius + 3, 6);
+/** Ring around selected points (drawn above the point layers), a little
+ * larger than the largest selected point size at any zoom: a dark ring
+ * under a white one, visible on light and dark points alike. */
+export function selectionLayers(picks: PointPick[], um: number, mpp: number) {
+  const r = (um / 2 / mpp) * 1.3;
   return [["dark", [0, 0, 0, 255], 4], ["light", [255, 255, 255, 255], 2]].map(([name, color, width]) =>
     new ScatterplotLayer<PointPick>({
       id: `points-selection-${name}`,
       data: picks,
       getPosition: (p) => [p.x, p.y],
-      radiusUnits: "pixels",
+      radiusUnits: "common",
       getRadius: r,
+      radiusMinPixels: 5,
       stroked: true,
       filled: false,
       lineWidthUnits: "pixels",

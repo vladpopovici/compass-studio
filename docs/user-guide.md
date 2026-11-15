@@ -207,9 +207,21 @@ layers:
 
 - Eye button: show or hide the layer's points.
 - Object counts per type; types not drawn yet are noted.
-- Size: point radius in screen pixels, from 1:4 zoom inward. Zoomed out
-  further, points shrink with the slide (down to 1 px), so millions of
-  points stay fast and readable.
+- Size: point diameter in microns, drawn true to size. One size cannot
+  suit every zoom, so there are three bands, chosen by the image resolution
+  on screen (µm per screen pixel), each with its own slider range and its
+  own remembered size; the slider shows the band you are in, and points
+  switch size when you zoom across a band:
+
+  | Band | µm per screen px | Range | Default | On a 0.47 µm/px slide |
+  |---|---|---|---|---|
+  | high magnification | under 2.5 | 5–100 µm | 20 µm | levels 0–2 |
+  | medium magnification | 2.5–12 | 20–200 µm | 60 µm | levels 3–4 |
+  | low magnification | 12 and up | 100–1000 µm | 300 µm | levels 5+ and fit |
+
+  The line under the slider names the band and how many screen pixels a
+  point covers now. Points are at least 1 px across. Images without a
+  calibration assume 0.5 µm/px.
 - Opacity slider.
 - All / None: show or hide every group.
 - One row per group: checkbox (show or hide), colour swatch (click to pick

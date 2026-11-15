@@ -3,7 +3,9 @@
 import { Eye, EyeOff, LoaderCircle } from "lucide-react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
-import { groupColor, MAX_FILTER_GROUPS, type PointStyle } from "@/viewer/points";
+import {
+  ASSUMED_MPP, bandAt, groupColor, MAX_FILTER_GROUPS, SIZE_BANDS, umPerScreenPx, type PointStyle,
+} from "@/viewer/points";
 
 export type PointLoad =
   | { state: "loading" }
@@ -18,7 +20,17 @@ function countsText(counts: Record<string, number>) {
   return Object.entries(counts).filter(([, n]) => n > 0).map(([t, n]) => `${fmt(n)} ${t}${n === 1 ? "" : "s"}`).join(", ");
 }
 
-function LayerCard({ l, onChange }: { l: LayerState; onChange: (s: PointStyle) => void }) {
+export interface Scale { mpp: number; assumed: boolean; zoom: number }
+
+const BAND_NAMES = { high: "high magnification", medium: "medium magnification", low: "low magnification" };
+
+/** Slider step: about 1 % of the band's range, rounded to 1, 2 or 5. */
+function step(min: number, max: number) {
+  const raw = (max - min) / 100, p = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map((m) => m * p).find((v) => v >= raw) ?? raw;
+}
+
+function LayerCard({ l, scale, onChange }: { l: LayerState; scale: Scale; onChange: (s: PointStyle) => void }) {
   const { info, style, load } = l;
   const points = (info.counts.point ?? 0) > 0;
   const hidden = new Set(style.hidden);
@@ -26,6 +38,9 @@ function LayerCard({ l, onChange }: { l: LayerState; onChange: (s: PointStyle) =
   const toggle = (i: number) => set({ hidden: hidden.has(i) ? style.hidden.filter((x) => x !== i) : [...style.hidden, i] });
   const other = Object.entries(info.counts).filter(([t, n]) => t !== "point" && n > 0);
   const ready = load?.state === "ready" ? load : null;
+  const band = bandAt(scale.mpp, scale.zoom);
+  const size = style.sizes[band.id];
+  const px = size / umPerScreenPx(scale.mpp, scale.zoom);
   return (
     <section className="border-b border-border p-2" data-layer={info.id} data-points={info.counts.point ?? 0}>
       <div className="flex items-center gap-1">
@@ -45,12 +60,18 @@ function LayerCard({ l, onChange }: { l: LayerState; onChange: (s: PointStyle) =
       )}
       {points && (
         <>
-          <label className="mt-1 flex items-center gap-2 text-muted-foreground">
+          <label className="mt-1 flex items-center gap-2 text-muted-foreground"
+                 title={`Point diameter at ${BAND_NAMES[band.id]} (${band.min} to ${band.max} µm). Each band of zoom keeps its own size: ${SIZE_BANDS.map((b) => `${BAND_NAMES[b.id]} ${style.sizes[b.id]} µm`).join(", ")}.`}>
             Size
-            <input type="range" min={1} max={12} step={0.5} value={style.size} className="flex-1 accent-primary"
-                   onChange={(e) => set({ size: +e.target.value })} aria-label="Point size" />
-            <span className="w-8 text-right font-mono tabular-nums">{style.size}</span>
+            <input type="range" min={band.min} max={band.max} step={step(band.min, band.max)} value={size}
+                   className="flex-1 accent-primary" aria-label="Point size (µm)"
+                   onChange={(e) => set({ sizes: { ...style.sizes, [band.id]: +e.target.value } })} />
+            <span className="w-14 text-right font-mono tabular-nums">{size} µm</span>
           </label>
+          <p className="px-1 text-muted-foreground" data-size-hint data-band={band.id}>
+            {BAND_NAMES[band.id]}: {band.min}–{band.max} µm; {px < 1 ? "<1" : px.toFixed(px < 10 ? 1 : 0)} px on screen
+            {scale.assumed ? ` (${ASSUMED_MPP} µm/px assumed)` : ""}
+          </p>
           <label className="flex items-center gap-2 text-muted-foreground">
             Opacity
             <input type="range" min={0.05} max={1} step={0.05} value={style.opacity} className="flex-1 accent-primary"
@@ -84,9 +105,11 @@ function LayerCard({ l, onChange }: { l: LayerState; onChange: (s: PointStyle) =
   );
 }
 
-export function LayersPanel({ stores, layers, onChange }: {
-  stores: Schemas["Store"][]; layers: LayerState[]; onChange: (id: string, s: PointStyle) => void;
+export function LayersPanel({ stores, layers, mpp, zoom, onChange }: {
+  stores: Schemas["Store"][]; layers: LayerState[]; mpp: number | null | undefined; zoom: number;
+  onChange: (id: string, s: PointStyle) => void;
 }) {
+  const scale: Scale = { mpp: mpp || ASSUMED_MPP, assumed: !mpp, zoom };
   if (!stores.length) return <p className="p-2 text-muted-foreground">No annotation stores for this image.</p>;
   return (
     <div>
@@ -94,7 +117,7 @@ export function LayersPanel({ stores, layers, onChange }: {
         <div key={s.id}>
           <h3 className="border-b border-border bg-muted px-2 py-1 font-semibold" title={s.id}>{s.name}</h3>
           {layers.filter((l) => l.info.store_id === s.id).map((l) => (
-            <LayerCard key={l.info.id} l={l} onChange={(st) => onChange(l.info.id, st)} />
+            <LayerCard key={l.info.id} l={l} scale={scale} onChange={(st) => onChange(l.info.id, st)} />
           ))}
         </div>
       ))}

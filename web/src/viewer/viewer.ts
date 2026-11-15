@@ -6,7 +6,7 @@ import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState 
 import type { ImageInfo } from "../api";
 import type { Layer } from "@deck.gl/core";
 import { LabelSource, type LabelStyle } from "./labels";
-import { selectionLayers, type PointPick, type PointSource, type PointStyle } from "./points";
+import { ASSUMED_MPP, bandAt, selectionLayers, type BandId, type PointPick, type PointSource, type PointStyle } from "./points";
 import { fitZoom, makeTileLayer, TILE_PRESETS, TileStats, type TileOptions } from "./tiles";
 
 export interface View {
@@ -46,6 +46,8 @@ export class Viewer {
   private labels = new Map<string, { source: LabelSource; style: LabelStyle }>();
   private points: { source: PointSource; style: PointStyle }[] = [];
   private selection: PointPick[] = [];
+  /** point size band at the current zoom; layers are rebuilt when it changes */
+  private band: BandId | null = null;
 
   constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
     this.deck = new Deck({
@@ -154,10 +156,12 @@ export class Viewer {
   private render() {
     const layers: Layer[] = this.imageLayer ? [this.imageLayer] : [];
     for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
-    for (const { source, style } of this.points) if (source.loaded) layers.push(source.layer(style));
+    const mpp = this.info?.mpp || ASSUMED_MPP;
+    const band = (this.band = bandAt(mpp, this.vs.zoom as number).id);
+    for (const { source, style } of this.points) if (source.loaded) layers.push(source.layer(style, mpp, band));
     if (this.selection.length) {
-      const size = Math.max(3, ...this.points.map((p) => p.style.size));
-      layers.push(...selectionLayers(this.selection, size));
+      const size = Math.max(...this.points.map((p) => p.style.sizes[band]), 0);
+      layers.push(...selectionLayers(this.selection, size, mpp));
     }
     this.deck.setProps({ layers });
   }
@@ -234,6 +238,7 @@ export class Viewer {
     this.vs = target === t && zoom === v.zoom && v.minZoom === minZoom && v.maxZoom === maxZoom
       ? v : { ...v, target, zoom, minZoom, maxZoom };
     this.deck.setProps({ viewState: this.vs });
+    if (this.points.length && bandAt(this.info?.mpp || ASSUMED_MPP, zoom).id !== this.band) this.render();
     this.opts.onView?.(this.view());
   }
 }

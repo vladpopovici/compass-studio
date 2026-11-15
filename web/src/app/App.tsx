@@ -225,7 +225,8 @@ export function App() {
                 </TabsList>
                 <TabsContent value="layers">
                   {ann.error && <p className="p-2 text-red-400">{ann.error}</p>}
-                  <LayersPanel stores={ann.stores} layers={ann.layers} onChange={ann.setStyle} />
+                  <LayersPanel stores={ann.stores} layers={ann.layers} mpp={image?.mpp} zoom={view?.zoom ?? 0}
+                               onChange={ann.setStyle} />
                 </TabsContent>
                 <TabsContent value="labels"><LabelPanel maps={maps} onChange={setStyle} /></TabsContent>
               </Tabs>

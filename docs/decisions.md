@@ -217,10 +217,18 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   hidden); at most 128 groups per layer filter. Colours per group live in
   their own attribute buffer; a change replaces only that attribute's
   descriptor (deck compares binary attribute descriptors by identity, so
-  mutating `.value` is ignored). Radius: the chosen size in screen px from
-  1:4 zoom inward, shrinking with the slide when zoomed out further (to
-  1 px): at fit, 5M overlapping 3 px discs were fill-rate bound (frame p95
-  34 ms); with shrinking, 60 fps at every zoom. Hover and click pick by
+  mutating `.value` is ignored). Size (revised 2026-11-15 at the owner's
+  request): a diameter in microns, drawn true to size, chosen per
+  resolution band of the view (µm per screen px: under 2.5, 2.5 to 12,
+  above 12; on the sample slide levels 0-2, 3-4, 5+), each band with its
+  own slider range (5-100, 20-200, 100-1000 µm) and remembered value
+  (20, 60, 300 µm). A single µm size failed both ways (50 µm is 107 px at
+  1:1 and under 1 px at fit on the sample slide), and clamping it to a
+  screen-pixel range made the slider do nothing when zoomed out. Lines get
+  the same rule in milestone 6. Fill rate: 5M overlapping 6 px discs at
+  fit gave frame p95 34 ms; with the default bands, 60 fps at every zoom
+  (frame p95 17 ms); the largest low-band sizes with millions of points
+  are not measured. Hover and click pick by
   index (object id from the Arrow buffer); attributes are fetched by id
   when selected. Measured (workstation, headless Firefox, 4 server CPUs,
   5M-point synthetic layer): group toggle 16 to 20 ms to screen, pick 3 to
