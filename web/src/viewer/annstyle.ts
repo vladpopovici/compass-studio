@@ -11,7 +11,7 @@
 
 import type { Layer } from "@deck.gl/core";
 import { PathLayer, ScatterplotLayer } from "@deck.gl/layers";
-import type { ImageInfo, LayerInfo } from "../api";
+import type { ImageInfo } from "../api";
 import type { View } from "./viewer";
 
 export type BandId = "high" | "medium" | "low";
@@ -59,11 +59,17 @@ export interface AnnStyle {
   /** polygon fill, 0 to 1 (0: outlines only) */
   fillOpacity: number;
   outline: boolean;
+  /** polygons whose bounding box is at least this many screen px on a side (by area) are shapes, smaller ones centres */
+  minShapePx: number;
 }
+
+/** range of `minShapePx` */
+export const MIN_SHAPE_PX: Range = { min: 2, max: 64, def: 8 };
 
 export const DEFAULT_ANN_STYLE: AnnStyle = {
   visible: true, hidden: [], colors: {}, opacity: 0.9,
   sizes: defaults(POINT_SIZES), widths: defaults(LINE_WIDTHS), fillOpacity: 0.3, outline: true,
+  minShapePx: MIN_SHAPE_PX.def,
 };
 
 /** used when the image has no calibration */
@@ -99,11 +105,6 @@ export function levelAt(zoom: number): number {
   return Math.max(0, Math.floor(-zoom + 1e-9));
 }
 
-/** Whether a layer's polygons are drawn as shapes (else as centres) at a zoom. */
-export function showsShapes(info: LayerInfo, zoom: number): boolean {
-  return levelAt(zoom) <= info.polygon_max_level;
-}
-
 export type ObjectKind = "point" | "polygon" | "polyline";
 
 export interface ObjectPick {
@@ -133,8 +134,8 @@ export interface AnnSource {
   layers(ctx: DrawContext): Layer[];
   /** the object behind a picked deck layer and index, if that layer is one of ours */
   pick(deckLayerId: string, index: number): ObjectPick | null;
-  /** view changes (tiled sources fetch here) */
-  setView?(view: View, image: ImageInfo): void;
+  /** view or style changes (tiled sources fetch here) */
+  setView?(view: View, image: ImageInfo, style: AnnStyle): void;
   /** set by the viewer: call when what `layers` returns has changed */
   onChange?: () => void;
   destroy?(): void;

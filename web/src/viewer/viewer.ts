@@ -132,10 +132,10 @@ export class Viewer {
   setAnnotations(entries: { source: AnnSource; style: AnnStyle }[]) {
     const known = new Set(this.annotations.map((e) => e.source));
     this.annotations = entries;
-    for (const { source } of entries) {
-      if (known.has(source)) continue;
-      source.onChange = () => this.queueRender();
-      if (this.info) source.setView?.(this.view(), this.info);
+    for (const { source, style } of entries) {
+      if (!known.has(source)) source.onChange = () => this.queueRender();
+      // styles can change what a tiled source fetches (polygon size cutoff)
+      if (this.info) source.setView?.(this.view(), this.info, style);
     }
     this.render();
   }
@@ -261,7 +261,7 @@ export class Viewer {
     this.vs = target === t && zoom === v.zoom && v.minZoom === minZoom && v.maxZoom === maxZoom
       ? v : { ...v, target, zoom, minZoom, maxZoom };
     this.deck.setProps({ viewState: this.vs });
-    if (this.info) for (const { source } of this.annotations) source.setView?.(this.view(), this.info);
+    if (this.info) for (const { source, style } of this.annotations) source.setView?.(this.view(), this.info, style);
     if (this.annotations.length && bandAt(this.info?.mpp || ASSUMED_MPP, zoom).id !== this.band) this.render();
     this.opts.onView?.(this.view());
   }

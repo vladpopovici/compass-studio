@@ -5,7 +5,7 @@ import { Eye, EyeOff, LoaderCircle } from "lucide-react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
 import {
-  ASSUMED_MPP, bandAt, BANDS, groupColor, LINE_WIDTHS, POINT_SIZES, showsShapes, umPerScreenPx,
+  ASSUMED_MPP, bandAt, BANDS, groupColor, LINE_WIDTHS, MIN_SHAPE_PX, POINT_SIZES, umPerScreenPx,
   type AnnStyle, type BandId, type Range,
 } from "@/viewer/annstyle";
 import { MAX_FILTER_GROUPS } from "@/viewer/points";
@@ -66,8 +66,7 @@ function LayerCard({ l, scale, onChange }: { l: LayerState; scale: Scale; onChan
   const other = Object.entries(info.counts).filter(([t, n]) => !DRAWN.has(t) && n > 0);
   const loads = [l.points, l.lines].filter((x): x is WholeLoad => !!x);
   const band = bandAt(scale.mpp, scale.zoom);
-  const shapes = has("polygon") && showsShapes(info, scale.zoom);
-  const centres = has("polygon") && !shapes;
+  const shapes = has("polygon");
   const sizeLabel = has("point") ? "Points" : "Centres";
   const groupCounts = loads.some((x) => x.state === "ready")
     ? info.groups.map((g) => loads.reduce((a, x) => a + (x.state === "ready" ? x.groupCounts[g.index] ?? 0 : 0), 0))
@@ -93,15 +92,25 @@ function LayerCard({ l, scale, onChange }: { l: LayerState; scale: Scale; onChan
         <>
           <p className="mt-1 px-1 text-muted-foreground" data-size-hint data-band={band.id}
              title="Sizes and widths are in microns; each band of zoom keeps its own values.">
-            {band.name}{centres ? ", polygons as centres" : ""}{scale.assumed ? ` (${ASSUMED_MPP} µm/px assumed)` : ""}
+            {band.name}{scale.assumed ? ` (${ASSUMED_MPP} µm/px assumed)` : ""}
           </p>
-          {(has("point") || centres) && (
+          {(has("point") || shapes) && (
             <BandSlider label={sizeLabel} ranges={POINT_SIZES} values={style.sizes} band={band.id} scale={scale}
                         onChange={(sizes) => set({ sizes })} />
           )}
           {(shapes || has("polyline")) && (
             <BandSlider label="Lines" ranges={LINE_WIDTHS} values={style.widths} band={band.id} scale={scale}
                         onChange={(widths) => set({ widths })} />
+          )}
+          {shapes && (
+            <label className="flex items-center gap-2 text-muted-foreground"
+                   title="Polygons smaller than this on screen (bounding box, by area) are drawn as centre dots; larger ones as shapes.">
+              <span className="w-14 shrink-0">Shapes</span>
+              <input type="range" min={MIN_SHAPE_PX.min} max={MIN_SHAPE_PX.max} step={1} value={style.minShapePx}
+                     className="min-w-0 flex-1 accent-primary" aria-label="Shapes from (px)"
+                     onChange={(e) => set({ minShapePx: +e.target.value })} />
+              <span className="w-14 shrink-0 text-right font-mono tabular-nums">≥ {style.minShapePx} px</span>
+            </label>
           )}
           {shapes && (
             <div className="flex items-center gap-2 text-muted-foreground">

@@ -16,6 +16,7 @@ a polyline layer, its line width control.
 
 import argparse
 import asyncio
+import json
 import pathlib
 import sys
 from urllib.parse import parse_qs, urlparse
@@ -148,16 +149,29 @@ async def click_buttons(ff, text: str, but: str = ""):
     await asyncio.sleep(0.5)
 
 
+def poly_stats(layer: str) -> str:
+    return f"JSON.stringify(window.__cs.ann.sources.current.get('{layer}').polygons.stats)"
+
+
+SET_RANGE = ("((el, v) => { Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, v);"
+             " el.dispatchEvent(new Event('input', { bubbles: true })); return 1; })")
+
+
 async def check_polygons(ff, check, shots):
-    """The largest polygon layer: shapes zoomed in, centres zoomed out."""
+    """Polygons by on-screen size: small ones as centres, large ones as shapes."""
     layer = await ff.eval(f"{POLYS}.dataset.layer")
     name = await ff.eval(f"{POLYS}.querySelector('span.font-medium').textContent")
-    await click_buttons(ff, "None", but=layer)  # only this layer's objects can be picked
     await ff.key("0")
     await asyncio.sleep(1.5)
-    hint = f"{POLYS}.querySelector('[data-size-hint]').textContent"
-    h = await ff.eval(hint)
-    check("centres" in h, f"polygons drawn as centres at fit: {h}")
+    await ff.wait_for(TILES_IDLE)
+    st = json.loads(await ff.eval(poly_stats(layer)))
+    check(st["centres"] > 0 and st["shapes"] < st["centres"], f"most of {name} drawn as centres at fit: {st}")
+    others = await ff.eval("[...document.querySelectorAll('[data-polygons]')].filter(e => +e.dataset.polygons > 0)"
+                           f".map(e => e.dataset.layer).filter(l => l !== '{layer}')")
+    if others:  # e.g. tissue regions: large enough to stay shapes at fit
+        big = [json.loads(await ff.eval(poly_stats(o))) for o in others]
+        check(any(b["shapes"] > 0 for b in big), f"large polygons drawn as shapes at fit: {big}")
+    await click_buttons(ff, "None", but=layer)  # only this layer's objects can be picked
     centre = await hover_point(ff, prefix=f"{name} ›")
     check(centre is not None, f"hovering a polygon centre names it: {centre}")
     if centre:  # zoom in around it (the wheel keeps the point under the cursor)
@@ -166,8 +180,19 @@ async def check_polygons(ff, check, shots):
             await asyncio.sleep(0.4)
         await asyncio.sleep(1.5)
     await ff.wait_for(TILES_IDLE)
-    h = await ff.eval(hint)
-    check("centres" not in h, f"polygons drawn as shapes zoomed in: {h}")
+    await ff.wait_for(f"window.__cs.ann.sources.current.get('{layer}').polygons.stats.pending === 0", 30)
+    await asyncio.sleep(0.3)
+    st = json.loads(await ff.eval(poly_stats(layer)))
+    check(st["shapes"] > 0, f"polygons drawn as shapes zoomed in: {st}")
+    # the cutoff slider moves polygons between shapes and centres, without a refetch here
+    slider = f"{POLYS}.querySelector('[aria-label=\"Shapes from (px)\"]')"
+    await ff.eval(f"{SET_RANGE}({slider}, 64)")
+    await asyncio.sleep(0.5)
+    st2 = json.loads(await ff.eval(poly_stats(layer)))
+    check(st2["shapes"] < st["shapes"] and st2["polygons"] == st["polygons"],
+          f"'Shapes from' 64 px turns small polygons into centres: {st['shapes']} -> {st2['shapes']} shapes")
+    await ff.eval(f"{SET_RANGE}({slider}, 2)")
+    await asyncio.sleep(0.5)
     check(await ff.eval(f"!!{POLYS}.querySelector('[aria-label=\"Fill opacity\"]') && "
                         f"!!{POLYS}.querySelector('[aria-label=\"Outlines\"]')"), "fill and outline controls shown")
     hit = await hover_point(ff, prefix=f"{name} ›")
@@ -178,6 +203,7 @@ async def check_polygons(ff, check, shots):
                                  " const t = a?.innerText ?? ''; return t.includes('Centre') && !t.includes('Loading attributes')"
                                  " ? t : null; })()", 15)
         check("polygon" in insp, f"click selects the polygon: {' '.join(insp.split())[:120]}")
+        check("Area" in insp and "Perimeter" in insp and "µm²" in insp, "inspector shows area and perimeter")
         if shots:
             await ff.screenshot(shots / "7-polygon.png")
         await ff.key("\ue00c")  # Escape
@@ -252,7 +278,7 @@ async def main() -> int:
         ok &= bool(cond)
 
     async with Firefox() as ff:
-        await ff.goto(f"{a.base}/#token={a.token}")
+        await ff.goto(f"{a.base}/?debug#token={a.token}")
         await ff.wait_for(TILES_IDLE)
         v0 = await settle(ff)
         check(v0.get("image"), f"first image opens fitted: {v0}")

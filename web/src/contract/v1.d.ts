@@ -259,6 +259,16 @@ export interface paths {
          *     `centroid-tile` v1, the centre of each polygon's bounding box, each
          *     object in exactly one tile. The payload's `schema` metadata tells which.
          *     `ETag` changes with the layer's revision.
+         *
+         *     Since 1.5.0 (capability `tiles.area`) a client can choose by size:
+         *     `min_area` returns a `polygon-tile` at any level, with only the
+         *     polygons whose bounding-box area (level-0 px^2) is at least
+         *     `min_area`; `max_area` returns a `centroid-tile` at any level, with
+         *     only the polygons whose bounding-box area is below it. Using the same
+         *     value for both splits a layer into shapes and centres without
+         *     overlap. Above `polygon_max_level` clients should scale `min_area`
+         *     with the level (for example a fixed on-screen size), so that tiles
+         *     stay small. Giving both is a 400.
          */
         get: operations["getLayerTile"];
         put?: never;
@@ -466,7 +476,8 @@ export interface components {
             /**
              * @description Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
              *     annotations, events, edit (present when at least one store has a
-             *     sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0.
+             *     sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
+             *     tiles.area since 1.5.0.
              *     Clients ignore unknown values.
              */
             capabilities: string[];
@@ -600,6 +611,10 @@ export interface components {
             values: {
                 [key: string]: number;
             };
+            /** @description Polygons, since 1.5.0. Area in level-0 px^2 (holes excluded). */
+            area?: number;
+            /** @description Polygons and polylines, since 1.5.0. Perimeter (all rings) or length, level-0 px. */
+            length?: number;
         };
         Op: {
             /** @constant */
@@ -998,7 +1013,10 @@ export interface operations {
     };
     getLayerTile: {
         parameters: {
-            query?: never;
+            query?: {
+                min_area?: number;
+                max_area?: number;
+            };
             header?: never;
             path: {
                 layer_id: components["parameters"]["LayerId"];

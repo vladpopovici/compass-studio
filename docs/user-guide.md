@@ -208,8 +208,7 @@ layers:
 
 - Eye button: show or hide the layer.
 - Object counts per type; types not drawn yet are noted.
-- A line naming the current zoom band (below), and "polygons as centres"
-  when zoomed out.
+- A line naming the current zoom band (below).
 - Sizes and widths are in microns, drawn true to size. One size cannot
   suit every zoom, so there are three bands, chosen by the image resolution
   on screen (µm per screen pixel). Each band has its own slider range and
@@ -225,24 +224,32 @@ layers:
   (defaults in brackets). Hover a slider for its range and how many screen
   pixels it covers now. Everything is at least 1 px wide. Images without a
   calibration assume 0.5 µm/px.
-- Points: point diameter. Centres: the diameter of polygon centres drawn
-  when zoomed out (below).
+- Points: point diameter. Centres: the diameter of the dots that stand in
+  for polygons too small to draw (below).
 - Lines: polygon outline and polyline width.
-- Outline and Fill (polygons, when zoomed in): outlines on or off, and the
-  fill opacity (0: outlines only; default 30 %).
+- Shapes (polygons): the smallest on-screen size, in screen pixels, at
+  which a polygon is drawn as a shape (default 8 px, range 2–64); smaller
+  ones are drawn as dots (below).
+- Outline and Fill (polygons): outlines on or off, and the fill opacity
+  (0: outlines only; default 30 %).
 - Opacity: the whole layer.
 - All / None: show or hide every group.
 - One row per group: checkbox (show or hide), colour swatch (click to pick
   a colour; points, fills, outlines and lines use it) and the number of
   points and polylines.
 
-**Level of detail.** Polygons are drawn as shapes from level 3 inward
-(on a 0.47 µm/px slide, from about 1:8). Zoomed out further, each polygon
-is drawn as a dot at the centre of its bounding box, in its group colour
-and sized like points ("Centres"). Polygons are fetched by area as you
-pan and zoom (in 4096 px squares when zoomed in), so a layer of a million
-cells opens at once; the first fully zoomed-out view of a large layer can
-take a few seconds (one million cells: about 4 s).
+**Level of detail.** Each polygon is drawn by its size on screen: when its
+bounding box covers at least Shapes × Shapes screen pixels (by area), it is
+drawn as a shape; otherwise as a dot at the centre of its bounding box, in
+its group colour and sized like points ("Centres"). So tissue regions stay
+shapes at fit, while cells become dots as you zoom out (with 8 px, a cell
+about 10 µm across on a 0.47 µm/px slide turns into a dot around level 2
+or 3). The size is judged at the start of each pyramid level, so polygons
+switch when you zoom across a level, not continuously. Polygons are
+fetched by area as you pan and zoom, so a layer of a million cells opens
+at once; the first fully zoomed-out view of a large layer can take a few
+seconds (one million cells: about 4 s). From level 3 inward a change of
+Shapes applies at once; zoomed out further it refetches the tiles in view.
 
 Point and polyline layers load when a slide opens (all at once, a spinner
 shows while loading). The first load of a large layer after a server start
@@ -260,7 +267,10 @@ off) or a polyline to select it; Shift+click adds or removes; click on
 empty space or press Esc to clear. Selected objects are outlined in black
 and white. The inspector shows each: name (or id), id, layer, group, type,
 position (points) or the centre of its bounding box (polygons, polylines)
-in pixels and microns, and its attributes (numbers stored with the object;
+in pixels and microns, the area and perimeter of a polygon (holes
+excluded from the area; the perimeter counts every ring) or the length of
+a polyline (in µm² and µm, or px² and px for images without a
+calibration), and its attributes (numbers stored with the object;
 fetched from the server when selected). "Clear" empties the selection; the
 cross on a card removes that object.
 

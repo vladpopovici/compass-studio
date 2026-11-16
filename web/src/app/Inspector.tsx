@@ -13,6 +13,11 @@ function value(v: number) {
   return Number.isInteger(v) ? fmt(v) : Math.abs(v) >= 1e4 || Math.abs(v) < 1e-3 ? v.toExponential(3) : v.toPrecision(4);
 }
 
+/** Area or length: 4 significant digits, grouped thousands, no exponent. */
+function measure(v: number) {
+  return v >= 1000 ? fmt(Math.round(v)) : v.toPrecision(4).replace(/\.?0+$/, "");
+}
+
 export function objectKey(p: { layerId: string; objectId: number }) {
   return `${p.layerId}|${p.objectId}`;
 }
@@ -54,6 +59,14 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
                 <dt className="text-muted-foreground">{p.kind === "point" ? "Position" : "Centre"}</dt>
                 <dd className="font-mono tabular-nums">{fmt(p.x, 1)}, {fmt(p.y, 1)} px</dd>
                 {mpp && <><dt /><dd className="font-mono tabular-nums">{fmt(p.x * mpp, 1)}, {fmt(p.y * mpp, 1)} µm</dd></>}
+                {o && o !== "error" && o.area != null && <>
+                  <dt className="text-muted-foreground">Area</dt>
+                  <dd className="font-mono tabular-nums" data-measure="area">{mpp ? `${measure(o.area * mpp * mpp)} µm²` : `${measure(o.area)} px²`}</dd>
+                </>}
+                {o && o !== "error" && o.length != null && <>
+                  <dt className="text-muted-foreground">{p.kind === "polygon" ? "Perimeter" : "Length"}</dt>
+                  <dd className="font-mono tabular-nums" data-measure="length">{mpp ? `${measure(o.length * mpp)} µm` : `${measure(o.length)} px`}</dd>
+                </>}
               </dl>
               {o === undefined && <p className="mt-1 px-1 text-muted-foreground">Loading attributes…</p>}
               {o === "error" && <p className="mt-1 px-1 text-red-400">Attributes could not be loaded.</p>}
