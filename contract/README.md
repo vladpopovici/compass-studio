@@ -2,11 +2,13 @@
 
 The HTTP contract between the CompassStudio server and client (decision D2).
 **Frozen 2026-11-13** after spikes S1 to S6.
-Current: 1.4.0. 1.1.0 added image name, objective power and version, and
+Current: 1.5.0. 1.1.0 added image name, objective power and version, and
 cacheable image tiles (`v`, `ETag`, 304); 1.2.0 added label maps (images
 with `role: labels`, raw `bin` tiles, class tables); 1.3.0 added
 `Store.aligned_to`, the image a store annotates; 1.4.0 added whole-layer
-polylines (`GET /layers/{id}/lines`, `line-layer` v1).
+polylines (`GET /layers/{id}/lines`, `line-layer` v1); 1.5.0 added
+size filters on polygon tiles (`min_area`, `max_area`) and object area and
+length.
 
 - `openapi.yaml`: the JSON API, OpenAPI 3.1, served under `/api/v1`.
 - `schemas/`: binary payloads (Arrow IPC), versioned separately:
@@ -39,6 +41,9 @@ Binary schemas never change once released; a change is a new version (see
   come from `classes` and are applied by the client, so toggling a class
   needs no refetch.
 - Polygon tiles up to `polygon_max_level` (3), centroid tiles above (S4).
+  Since 1.5.0 `min_area` (polygons at any level) and `max_area`
+  (centroids at any level) filter by bounding-box area, so a client can
+  draw large polygons as shapes and small ones as centres at every zoom.
 - Edits: batched operations against `base_revision` (409 on a stale base,
   422 on invalid operations or geometry); undo by committing a logged
   `inverse`. Revision changes, including those made by another process, are

@@ -8,8 +8,8 @@ conformance tests check the server against these files.
 | Schema | Version | Endpoint |
 |---|---|---|
 | `point-layer` | 1 | `GET /layers/{id}/points` |
-| `polygon-tile` | 1 | `GET /layers/{id}/tiles/{level}/{col}/{row}` up to `polygon_max_level` |
-| `centroid-tile` | 1 | the same endpoint above `polygon_max_level` |
+| `polygon-tile` | 1 | `GET /layers/{id}/tiles/{level}/{col}/{row}` up to `polygon_max_level`, or at any level with `min_area` (since API 1.5.0) |
+| `centroid-tile` | 1 | the same endpoint above `polygon_max_level`, or at any level with `max_area` (since API 1.5.0) |
 | `line-layer` | 1 | `GET /layers/{id}/lines` (since API 1.4.0) |
 
 Rules:

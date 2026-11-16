@@ -46,7 +46,7 @@ from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, LINE_LAYER_VERSION, P
                           point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.4.0"
+API_VERSION = "1.5.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
@@ -169,7 +169,7 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
     @app.get("/api/v1/info")
     def info():
-        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "lines", "events"]
+        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "lines", "tiles.area", "events"]
         if any(d.sidecar for d in datasets.values()):
             caps.append("edit")
         return {"api_version": API_VERSION, "capabilities": caps,
@@ -342,8 +342,13 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         return await _whole_layer("lines", layer_id, _lines_batch)
 
     @app.get("/api/v1/layers/{layer_id}/tiles/{level}/{col}/{row}")
-    async def layer_tile(layer_id: str, level: int, col: int, row: int):
+    async def layer_tile(layer_id: str, level: int, col: int, row: int,
+                         min_area: float | None = None, max_area: float | None = None):
         ds, view, lid, editable = _resolve(layer_id)
+        if min_area is not None and max_area is not None:
+            raise HTTPException(400, "min_area and max_area are exclusive")
+        if any(a is not None and not 0 <= a < float("inf") for a in (min_area, max_area)):
+            raise HTTPException(400, "areas must be finite and non-negative")
         if not 0 <= level <= 30 or col < 0 or row < 0:
             raise HTTPException(404, "no such tile")
         side = TILE * 2 ** level
@@ -355,10 +360,11 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         meta = dict(layer_id=layer_id, revision=rev, level=level, col=col, row=row)
 
         def work():
-            if level <= POLYGON_MAX_LEVEL:
-                b = view.polygons(lid, bbox)
+            # min_area: polygons at any level; max_area: centroids at any level
+            if min_area is not None or (max_area is None and level <= POLYGON_MAX_LEVEL):
+                b = view.polygons(lid, bbox, min_area=min_area)
                 return encode_ipc(polygon_tile(b, view.group_index(lid, b.group_ids), **meta))
-            ids, gids, xy = view.centroids(lid, bbox)
+            ids, gids, xy = view.centroids(lid, bbox, max_area=max_area)
             return encode_ipc(centroid_tile(ids, view.group_index(lid, gids), xy, **meta))
         body = await in_pool(work)
         cache = "private, no-cache" if editable else "private, max-age=3600"

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CompassStudio
-  version: 1.4.0
+  version: 1.5.0
   summary: Contract between the CompassStudio server and its browser client.
   description: |
     Frozen 2026-11-13 (decision log D2). Under `/api/v1` only backward-compatible
@@ -17,6 +17,10 @@ info:
     annotates.
     1.4.0 (2026-11-15, additive): `GET /layers/{id}/lines`, a layer's
     polylines (`line-layer` v1); capability `lines`.
+    1.5.0 (2026-11-16, additive): polygon tiles take `min_area` (polygons
+    at any level) or `max_area` (centroids at any level), filters on the
+    bounding-box area, for level of detail by on-screen size; capability
+    `tiles.area`. `ObjectInfo.area` and `ObjectInfo.length`.
 
     Conventions:
     - Coordinates are level-0 pixels of the image; microns via `mpp`.
@@ -269,7 +273,26 @@ paths:
         `centroid-tile` v1, the centre of each polygon's bounding box, each
         object in exactly one tile. The payload's `schema` metadata tells which.
         `ETag` changes with the layer's revision.
+
+        Since 1.5.0 (capability `tiles.area`) a client can choose by size:
+        `min_area` returns a `polygon-tile` at any level, with only the
+        polygons whose bounding-box area (level-0 px^2) is at least
+        `min_area`; `max_area` returns a `centroid-tile` at any level, with
+        only the polygons whose bounding-box area is below it. Using the same
+        value for both splits a layer into shapes and centres without
+        overlap. Above `polygon_max_level` clients should scale `min_area`
+        with the level (for example a fixed on-screen size), so that tiles
+        stay small. Giving both is a 400.
       operationId: getLayerTile
+      parameters:
+        - name: min_area
+          in: query
+          required: false
+          schema: { type: number, minimum: 0 }
+        - name: max_area
+          in: query
+          required: false
+          schema: { type: number, minimum: 0 }
       responses:
         "200":
           description: Polygon or centroid tile
@@ -592,7 +615,8 @@ components:
           description: |
             Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
             annotations, events, edit (present when at least one store has a
-            sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0.
+            sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
+            tiles.area since 1.5.0.
             Clients ignore unknown values.
           type: array
           items: { type: string }
@@ -762,6 +786,12 @@ components:
           description: Sparse scalar attributes present on the object.
           type: object
           additionalProperties: { type: number }
+        area:
+          description: Polygons, since 1.5.0. Area in level-0 px^2 (holes excluded).
+          type: number
+        length:
+          description: Polygons and polylines, since 1.5.0. Perimeter (all rings) or length, level-0 px.
+          type: number
 
     Op:
       oneOf:

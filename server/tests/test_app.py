@@ -33,7 +33,7 @@ def test_security(client):
 
 def test_info(client):
     i = client.get("/api/v1/info").json()
-    assert i["api_version"] == "1.4.0" and "lines" in i["capabilities"] and "edit" in i["capabilities"]
+    assert i["api_version"] == "1.5.0" and "lines" in i["capabilities"] and "tiles.area" in i["capabilities"] and "edit" in i["capabilities"]
     assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"],
                             "line-layer": ["1"]}
 
@@ -98,12 +98,32 @@ def test_layers_points_tiles(client):
     # above polygon_max_level: centroids, each object exactly once
     c = arrow(client.get("/api/v1/layers/synth:2/tiles/4/0/0"))
     assert c.schema.metadata[b"schema"] == b"centroid-tile" and c.num_rows == 400
+    # by size: the same cutoff splits the layer into shapes and centres, at any level
+    regions = arrow(client.get("/api/v1/layers/synth:3/tiles/4/0/0?min_area=0"))
+    assert regions.schema.metadata[b"schema"] == b"polygon-tile" and regions.num_rows == 3
+    for level in (0, 4):
+        side = 512 * 2 ** level
+        cut = 400.0
+        big, small = set(), set()
+        for col in range(-(-4096 // side)):
+            for row in range(-(-2048 // side)):
+                big |= set(arrow(client.get(f"/api/v1/layers/synth:2/tiles/{level}/{col}/{row}?min_area={cut}"))["object_id"].to_pylist())
+                t = arrow(client.get(f"/api/v1/layers/synth:2/tiles/{level}/{col}/{row}?max_area={cut}"))
+                assert t.schema.metadata[b"schema"] == b"centroid-tile"
+                small |= set(t["object_id"].to_pylist())
+        assert big and small and not big & small and len(big | small) == 400
+    assert client.get("/api/v1/layers/synth:2/tiles/0/0/0?min_area=1&max_area=2").status_code == 400
+    assert client.get("/api/v1/layers/synth:2/tiles/0/0/0?min_area=-1").status_code == 400
 
     ids = ",".join(str(i) for i in sorted(seen)[:3])
     fc = client.get(f"/api/v1/layers/synth:2/features?ids={ids}").json()
     assert len(fc["features"]) == 3 and fc["features"][0]["geometry"]["type"] == "Polygon"
     objs = client.get(f"/api/v1/layers/synth:2/objects?ids={ids}").json()["objects"]
     assert len(objs) == 3 and all("values" in o for o in objs)
+    assert all(o["area"] > 0 and o["length"] > 0 for o in objs)
+    ln_id = ln["object_id"][0].as_py()
+    lobj = client.get(f"/api/v1/layers/synth:4/objects?ids={ln_id}").json()["objects"][0]
+    assert "area" not in lobj and lobj["length"] > 0
     assert client.get("/api/v1/layers/synth:9").status_code == 404
     assert client.get("/api/v1/layers/nope").status_code == 404
     assert client.get("/api/v1/layers/synth:2/features?ids=x").status_code == 400

@@ -104,6 +104,11 @@ later because the client depends only on the contract (D2).
   1.4.0 (2026-11-15, milestone 6, additive): `GET /layers/{id}/lines`, a
   layer's polylines whole (`line-layer` v1: object_id, group, coords),
   capability `lines`.
+  1.5.0 (2026-11-16, additive): polygon tiles take `min_area` (polygons
+  at any level) or `max_area` (centroids at any level), filters on the
+  R-tree bounding-box area; capability `tiles.area`. `ObjectInfo.area`
+  (polygons) and `ObjectInfo.length` (perimeter or polyline length), in
+  level-0 px units, computed when objects are fetched.
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -248,7 +253,22 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   owner tile (large regions vanish when their centre tile is off screen)
   or with duplicates (double fill and outlines at tile borders). Zoomed
   out, centroid tiles at the shown level, drawn as points sized by the
-  point bands. Each group is one SolidPolygonLayer (server triangles) and
+  point bands. Revised 2026-11-16 at the owner's request (cells and
+  tissue regions share layers; regions must not become dots): the choice
+  is per polygon at every zoom, by on-screen size: bounding-box area at
+  least `minShapePx`^2 screen px (default 8 px, per layer, 2 to 64; judged
+  at the start of the shown level) draws a shape, smaller draws a centre.
+  From level 3 inward the level-3 tiles are split on the client (no
+  refetch on zoom or cutoff change); further out, polygon tiles with
+  `min_area` and centroid tiles with `max_area` on the shown level's grid,
+  the same cutoff. Bounding-box area rather than true area, chosen by the
+  owner: it comes from the R-tree, so no geometry is decoded for small
+  polygons. Rejected: switching only above level 3 (cells 2 to 3 px wide
+  stay shapes), and switching a whole layer by its typical size (a layer
+  mixing cells and regions behaves as cells). Measured (1M cells and 200
+  regions, workstation, 4 CPUs, densest tile): the area filter adds 5 to
+  15 % to a centroid query (985 against 912 ms for a fit-level tile of
+  254k cells); the large-polygon tile at fit takes 130 to 150 ms. Each group is one SolidPolygonLayer (server triangles) and
   one PathLayer (outline rings, sharing the vertex buffer), so toggles and
   colours are prop changes. Style per layer: fill opacity (default 30 %),
   outline on or off, width in µm per band. Polylines: the whole layer
@@ -410,9 +430,8 @@ baseline (D5).
   where uvloop is unavailable). HTTP/2 is ruled out
   for now: browsers only use it over TLS, which on 127.0.0.1 means
   self-signed certificates or a locally installed CA.
-- Zoomed-out level of detail (D6): v1 switches to centroids above level 3
-  (S4 server cost); whether the GPU needs an earlier switch, and the density
-  raster, are open.
+- Zoomed-out level of detail (D6): polygons switch to centroids by
+  on-screen size (2026-11-16); the density raster is open.
 - Layer object counts (`Layer.counts`) are computed with a full join on
   first use: 3.3 s for the 6M-object synthetic store (4.6 s for the first
   layer listing in milestone 5, which delays the first open of a slide).

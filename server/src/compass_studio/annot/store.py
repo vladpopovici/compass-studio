@@ -150,34 +150,48 @@ class AnnotationStore:
     # Queries
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _area_filter(min_area: float | None, max_area: float | None) -> tuple[str, tuple]:
+        """SQL condition on the R-tree bounding-box area (level-0 px^2)."""
+        sql, args = "", ()
+        if min_area is not None:
+            sql, args = sql + "AND (r.max_x - r.min_x) * (r.max_y - r.min_y) >= ? ", args + (min_area,)
+        if max_area is not None:
+            sql, args = sql + "AND (r.max_x - r.min_x) * (r.max_y - r.min_y) < ? ", args + (max_area,)
+        return sql, args
+
     def query_rows(self, layer_id: int, bbox: tuple[float, float, float, float],
-                   type_code: int = POLYGON) -> list[tuple[int, int, bytes]]:
-        """(object_id, group_id, wkb) of one layer's objects whose bbox meets ``bbox``."""
+                   type_code: int = POLYGON, min_area: float | None = None) -> list[tuple[int, int, bytes]]:
+        """(object_id, group_id, wkb) of one layer's objects whose bbox meets ``bbox``
+        (and, with ``min_area``, whose bbox area is at least that)."""
         x0, y0, x1, y1 = bbox
+        cond, extra = self._area_filter(min_area, None)
         sql = (f"SELECT o.object_id, MIN(og.group_id), o.wkb "
                f"FROM objects_rtree r "
                f"JOIN objects o ON o.object_id = r.object_id "
                f"JOIN object_groups og ON og.object_id = o.object_id "
-               f"WHERE r.max_x >= ? AND r.min_x <= ? AND r.max_y >= ? AND r.min_y <= ? "
+               f"WHERE r.max_x >= ? AND r.min_x <= ? AND r.max_y >= ? AND r.min_y <= ? {cond}"
                f"AND o.type_code = ? AND og.group_id IN ({self._layer_groups(layer_id)}) "
                f"GROUP BY o.object_id")
-        return self._conn.execute(sql, (x0, x1, y0, y1, type_code)).fetchall()
+        return self._conn.execute(sql, (x0, x1, y0, y1, *extra, type_code)).fetchall()
 
     def polygons(self, layer_id: int, bbox: tuple[float, float, float, float],
-                 decoder: str = "shapely") -> PolygonBatch:
-        return decode_polygons(self.query_rows(layer_id, bbox), decoder)
+                 decoder: str = "shapely", min_area: float | None = None) -> PolygonBatch:
+        return decode_polygons(self.query_rows(layer_id, bbox, min_area=min_area), decoder)
 
-    def centroids(self, layer_id: int, bbox: tuple[float, float, float, float]):
+    def centroids(self, layer_id: int, bbox: tuple[float, float, float, float], max_area: float | None = None):
         """Polygons whose bbox centre lies in ``bbox`` (half-open): (ids, group ids, xy).
-        Centres of bounding boxes, no WKB decoding (level-of-detail stand-in)."""
+        Centres of bounding boxes, no WKB decoding (level-of-detail stand-in);
+        with ``max_area``, only polygons whose bbox area is below it."""
         x0, y0, x1, y1 = bbox
+        cond, extra = self._area_filter(None, max_area)
         sql = (f"SELECT o.object_id, MIN(og.group_id), (r.min_x + r.max_x) / 2, (r.min_y + r.max_y) / 2 "
                f"FROM objects_rtree r JOIN objects o ON o.object_id = r.object_id "
                f"JOIN object_groups og ON og.object_id = o.object_id "
-               f"WHERE r.max_x >= ? AND r.min_x <= ? AND r.max_y >= ? AND r.min_y <= ? "
+               f"WHERE r.max_x >= ? AND r.min_x <= ? AND r.max_y >= ? AND r.min_y <= ? {cond}"
                f"AND o.type_code = ? AND og.group_id IN ({self._layer_groups(layer_id)}) "
                f"GROUP BY o.object_id")
-        rows = self._conn.execute(sql, (x0, x1, y0, y1, POLYGON)).fetchall()
+        rows = self._conn.execute(sql, (x0, x1, y0, y1, *extra, POLYGON)).fetchall()
         ids, gids, xy = _columns(rows)
         keep = (xy[:, 0] >= x0) & (xy[:, 0] < x1) & (xy[:, 1] >= y0) & (xy[:, 1] < y1)
         return ids[keep], gids[keep], xy[keep]
@@ -230,13 +244,15 @@ class AnnotationStore:
         return out
 
     def objects(self, layer_id: int, object_ids: list[int]) -> list[dict]:
-        """Attributes (sparse scalars) of the given objects of one layer."""
+        """Attributes (sparse scalars) of the given objects of one layer, with
+        ``area`` (polygons, level-0 px^2) and ``length`` (polygon perimeter or
+        polyline length, level-0 px)."""
         q = ",".join("?" * len(object_ids))
         names = dict(self._conn.execute("SELECT attr_id, attr_name FROM scalar_attributes"))
         index = {g.id: g.index for g in self.groups[layer_id]}
         out = []
-        for oid, code, name, gid, ids, vals in self._conn.execute(
-                f"SELECT o.object_id, o.type_code, o.name, MIN(og.group_id), s.ids_u32, s.vals_f32 "
+        for oid, code, name, gid, ids, vals, wkb in self._conn.execute(
+                f"SELECT o.object_id, o.type_code, o.name, MIN(og.group_id), s.ids_u32, s.vals_f32, o.wkb "
                 f"FROM objects o JOIN object_groups og ON og.object_id = o.object_id "
                 f"LEFT JOIN object_scalar_sparse s ON s.object_id = o.object_id "
                 f"WHERE o.object_id IN ({q}) AND og.group_id IN ({self._layer_groups(layer_id)}) "
@@ -245,8 +261,14 @@ class AnnotationStore:
             if ids is not None:
                 values = {names[int(i)]: float(v) for i, v in
                           zip(np.frombuffer(ids, np.uint32), np.frombuffer(vals, np.float32))}
-            out.append({"object_id": oid, "type": CODE_TYPE.get(code, str(code)), "name": name,
-                        "group_id": gid, "group": index[gid], "values": values})
+            obj = {"object_id": oid, "type": CODE_TYPE.get(code, str(code)), "name": name,
+                   "group_id": gid, "group": index[gid], "values": values}
+            if code in (POLYGON, POLYLINE) and wkb is not None:
+                g = shapely.from_wkb(wkb)
+                if code == POLYGON:
+                    obj["area"] = float(g.area)
+                obj["length"] = float(g.length)
+            out.append(obj)
         return out
 
 
