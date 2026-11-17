@@ -42,6 +42,10 @@ class Pyramid:
     aligned_to: str | None = None  # labels: the image id they belong to
     classes: list[dict] | None = None  # labels: [{value, name, color}]
     background: int | None = None  # labels: value drawn transparent
+    # images: "rgb" (8-bit colour, served as JPEG/WebP/PNG) or "channels"
+    # (one raw plane per channel, mixed in the browser; since 1.7.0)
+    display: str = "rgb"
+    channel_defaults: list[dict] | None = None  # channels: from <image>.channels.json
 
     def info(self) -> dict:
         out = {"width": self.width, "height": self.height, "tile_size": self.tile,
@@ -52,7 +56,17 @@ class Pyramid:
                "role": self.role, "dtype": self.dtype}
         if self.role == "labels":
             out |= {"aligned_to": self.aligned_to, "classes": self.classes, "background": self.background}
+        else:
+            out["display"] = self.display
+            if self.display == "channels":
+                out["channel_defaults"] = self.channel_defaults
         return out
+
+    def as_image(self) -> None:
+        """Serve a single-channel integer pyramid as a one-channel image, not a label map."""
+        self.role, self.background, self.display = "image", None, "channels"
+        if not self.channels:
+            self.channels = ["I"]
 
     def tile_shape(self, level: int, col: int, row: int) -> tuple[int, int]:
         """(height, width) of a tile; IndexError outside the grid."""
@@ -69,6 +83,14 @@ class Pyramid:
 
 
 LABEL_DTYPES = ("uint8", "uint16", "uint32", "int32")
+CHANNEL_DTYPES = ("uint8", "uint16")
+RGB_NAMES = ([], ["R", "G", "B"], ["R", "G", "B", "A"])
+
+
+def display_of(dtype: str, names: list[str], nch: int) -> str:
+    """8-bit images of 3 (or 4) channels named R, G, B (or unnamed) are colour
+    images; everything else is shown channel by channel."""
+    return "rgb" if dtype == "uint8" and nch in (3, 4) and names in RGB_NAMES else "channels"
 
 
 class ZarrPyramid(Pyramid):
@@ -98,11 +120,17 @@ class ZarrPyramid(Pyramid):
         if labels and dtype.name not in LABEL_DTYPES:
             raise ValueError(f"label maps must be one of {LABEL_DTYPES}, not {dtype.name}")
         self._ndim = ndim
+        names = list(attrs.get("channel_names", []))
+        display = "channels" if labels else display_of(dtype.name, names, nch)
+        if display == "channels" and dtype.name not in CHANNEL_DTYPES and not labels:
+            raise ValueError(f"multichannel images must be one of {CHANNEL_DTYPES}, not {dtype.name}")
+        if display == "channels" and len(names) != nch:
+            names = [f"Channel {i + 1}" for i in range(nch)]
         chunk = self._zarr[0].chunks  # inner chunk shape for sharded arrays
         super().__init__(
             width=shapes[0][1], height=shapes[0][0],
             levels=[LevelInfo(width=s[1], height=s[0]) for s in shapes],
-            tile=int(chunk[0]), channels=list(attrs.get("channel_names", [])),
+            tile=int(chunk[0]), channels=names, display=display,
             mpp=attrs.get("base_mpp"), kind="zarr", role="labels" if labels else "image",
             dtype=dtype.name, background=0 if labels else None,
             fast_levels=[f is not None for f in self._fast],

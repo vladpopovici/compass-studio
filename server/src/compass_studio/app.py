@@ -45,14 +45,17 @@ from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, LINE_LAYER_VERSION, P
                           POLYGON_TILE_VERSION, AnnotationStore, centroid_tile, encode_ipc, line_layer,
                           point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
+from .imaging.tilecache import TileCache
 
-API_VERSION = "1.6.0"
+API_VERSION = "1.7.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
 _NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MEDIA = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp", "bin": "application/octet-stream"}
-_FORMATS = {"image": {"jpg", "webp", "png"}, "labels": {"bin", "png"}}
+_FORMATS = {"image": {"jpg", "webp", "png"}, "labels": {"bin", "png"}, "channels": {"bin"}}
+HISTOGRAM_PIXELS = 1 << 20  # histograms come from the finest level of at most this many pixels
+PERCENTILES = (0.1, 0.5, 1, 2, 5, 50, 95, 98, 99, 99.5, 99.8, 99.9, 99.99)
 
 
 class Guard:
@@ -160,6 +163,10 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         tile_threads = default_tile_threads()
     pool = ThreadPoolExecutor(tile_threads, thread_name_prefix="tile") if tile_threads else None
 
+    tiles = TileCache()
+    histograms: dict[tuple[str, str], dict] = {}
+    app.state.tiles = tiles
+
     async def in_pool(fn):
         if pool is not None:
             return await asyncio.get_running_loop().run_in_executor(pool, fn)
@@ -169,7 +176,8 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
     @app.get("/api/v1/info")
     def info():
-        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "lines", "tiles.area", "events"]
+        caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "channels", "annotations", "lines",
+                "tiles.area", "events"]
         if any(d.sidecar for d in datasets.values()):
             caps += ["edit", "save"]
         return {"api_version": API_VERSION, "capabilities": caps,
@@ -194,10 +202,15 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
     @app.get("/api/v1/images/{image_id}/tiles/{level}/{col}/{row}.{fmt}")
     async def image_tile(request: Request, image_id: str, level: int, col: int, row: int, fmt: str,
-                         q: int = 90, v: str | None = None):
+                         q: int = 90, v: str | None = None, channel: int | None = None):
         p = _image(image_id)
-        if fmt not in _FORMATS[p.role] or not 1 <= q <= 100:
-            raise HTTPException(400, f"format: {p.role} tiles come as {', '.join(sorted(_FORMATS[p.role]))}")
+        kind = "channels" if p.role == "image" and p.display == "channels" else p.role
+        if fmt not in _FORMATS[kind] or not 1 <= q <= 100:
+            raise HTTPException(400, f"format: {kind} tiles come as {', '.join(sorted(_FORMATS[kind]))}")
+        if (kind == "channels") != (channel is not None):
+            raise HTTPException(400, "channel: required for multichannel images, only for them")
+        if channel is not None and not 0 <= channel < len(p.channels):
+            raise HTTPException(400, f"channel: 0 to {len(p.channels) - 1}")
         if fmt == "png" and p.role == "labels" and p.dtype not in ("uint8", "uint16"):
             raise HTTPException(400, "format: png only for 8 and 16-bit labels")
         gz = fmt == "bin" and "gzip" in request.headers.get("accept-encoding", "")
@@ -213,9 +226,13 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
 
         def work():
             t0 = time.perf_counter()
-            arr = p.read_tile(level, col, row)
+            if kind == "channels":  # every channel of the tile, read once for all channel requests
+                arr = tiles.get((image_id, p.version, level, col, row), lambda: p.read_tile(level, col, row))
+                arr = arr if arr.ndim == 2 else arr[..., channel]
+            else:
+                arr = p.read_tile(level, col, row)
             t1 = time.perf_counter()
-            body = _encode_labels(arr, fmt, p.dtype, gz) if p.role == "labels" else _encode(arr, fmt, q)
+            body = _encode(arr, fmt, q) if kind == "image" else _encode_labels(arr, fmt, p.dtype, gz)
             return body, t1 - t0, time.perf_counter() - t1
 
         try:
@@ -229,6 +246,16 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
             if gz:
                 headers["Content-Encoding"] = "gzip"
         return Response(body, media_type=_MEDIA[fmt], headers=headers)
+
+    @app.get("/api/v1/images/{image_id}/histogram")
+    async def image_histogram(image_id: str):
+        p = _image(image_id)
+        if p.role != "image" or p.display != "channels":
+            raise HTTPException(400, "histograms are for multichannel images")
+        key = (image_id, p.version)
+        if key not in histograms:
+            histograms[key] = await in_pool(lambda: _histogram(p))
+        return histograms[key]
 
     # -- stores and layers ------------------------------------------------
 
@@ -596,6 +623,27 @@ def _float(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _histogram(p: Pyramid) -> dict:
+    """Per channel: range, percentiles and 256 counts over [min, max], from the
+    finest level of at most ``HISTOGRAM_PIXELS`` pixels (the coarsest if none)."""
+    lv = next((i for i, L in enumerate(p.levels) if L.width * L.height <= HISTOGRAM_PIXELS), len(p.levels) - 1)
+    L, t = p.levels[lv], p.tile
+    data = np.empty((L.height, L.width, len(p.channels)), np.dtype(p.dtype))
+    for row in range(-(-L.height // t)):
+        for col in range(-(-L.width // t)):
+            a = p.read_tile(lv, col, row)
+            data[row * t:row * t + a.shape[0], col * t:col * t + a.shape[1]] = a.reshape(a.shape[0], a.shape[1], -1)
+    out = []
+    for c in range(data.shape[2]):
+        v = data[..., c].ravel()
+        lo, hi = int(v.min()), int(v.max())
+        counts, _ = np.histogram(v, bins=256, range=(lo, hi if hi > lo else lo + 1))
+        pct = np.percentile(v, PERCENTILES)
+        out.append({"min": lo, "max": hi, "counts": counts.tolist(),
+                    "percentiles": {f"{q:g}": float(x) for q, x in zip(PERCENTILES, pct)}})
+    return {"level": lv, "channels": out}
 
 
 def _encode_labels(arr: np.ndarray, fmt: str, dtype: str, gz: bool) -> bytes:

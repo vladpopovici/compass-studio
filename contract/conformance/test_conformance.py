@@ -23,6 +23,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT202012
 
 from compass_studio.app import Dataset, create_app
+from compass_studio.imaging.channels import SyntheticChannels
 from compass_studio.imaging.labels import SyntheticLabels
 from compass_studio.imaging.pyramid import SyntheticPyramid
 from compass_studio.synth.generate import Params, generate
@@ -124,7 +125,7 @@ def api(tmp_path_factory):
     labels = SyntheticLabels(2000, 1000)
     labels.aligned_to = "img"
     labels.classes = [{"value": 1, "name": "one", "color": "#112233"}, {"value": 2, "name": "two", "color": None}]
-    app = create_app({"img": SyntheticPyramid(2000, 1000), "lab": labels}, TOKEN, {HOST}, {f"http://{HOST}"},
+    app = create_app({"img": SyntheticPyramid(2000, 1000), "lab": labels, "mc": SyntheticChannels(2000, 1000, 3)}, TOKEN, {HOST}, {f"http://{HOST}"},
                      datasets={"conf": ds})
     with TestClient(app, base_url=f"http://{HOST}") as c:
         c.headers["Authorization"] = f"Bearer {TOKEN}"
@@ -169,6 +170,17 @@ def test_scenario(api):
     assert "immutable" in r.headers["cache-control"] and r.headers["etag"] == f'"{ver}"'
     assert a.get("/images/img/tiles/0/0/0.jpg", headers={"If-None-Match": r.headers["etag"]}).status_code == 304
     a.get("/images/img/tiles/0/0/0.gif")
+    # multichannel images (1.7.0)
+    mc = next(i for i in imgs if i.get("display") == "channels")
+    assert mc["channels"] == ["DAPI", "Marker 1", "Marker 2"] and mc["dtype"] == "uint16"
+    r = a.get(f"/images/{mc['id']}/tiles/0/0/0.bin?channel=1", headers={"Accept-Encoding": "gzip"})
+    assert r.headers["content-encoding"] == "gzip" and len(r.content) == 512 * 512 * 2
+    a.get(f"/images/{mc['id']}/tiles/0/0/0.bin")  # 400: no channel
+    a.get(f"/images/{mc['id']}/tiles/0/0/0.jpg?channel=0")  # 400
+    a.get("/images/img/tiles/0/0/0.jpg?channel=0")  # 400: not multichannel
+    h = a.get(f"/images/{mc['id']}/histogram").json()
+    assert len(h["channels"]) == 3 and len(h["channels"][0]["counts"]) == 256
+    a.get("/images/img/histogram")  # 400
 
     stores = a.get("/stores").json()
     sid = stores[0]["id"]

@@ -11,6 +11,7 @@ import uvicorn
 from .app import Dataset, create_app
 from .imaging.labels import (SyntheticLabels, classes_file_for, load_classes, pair_labels,
                               pair_with_image)
+from .imaging.channels import SyntheticChannels, channels_file_for, load_channel_defaults
 from .imaging.pyramid import SyntheticPyramid, ZarrPyramid, find_images
 
 
@@ -42,6 +43,11 @@ def main(argv: list[str] | None = None) -> None:
                     help="serve every COMPASS .zarr folder directly in DIR, id = folder name (repeatable)")
     ap.add_argument("--synthetic", type=_kv, action="append", default=[], metavar="ID=WxH",
                     help="procedural test pyramid, e.g. synth200k=200000x200000")
+    ap.add_argument("--synthetic-channels", type=_kv, action="append", default=[], metavar="ID=WxHxN",
+                    help="procedural multichannel (uint16) test image, e.g. mc=40000x30000x8")
+    ap.add_argument("--channels", type=_kv, action="append", default=[], metavar="ID=FILE",
+                    help="channel display defaults (JSON) for a multichannel image "
+                         "(default: <image>.channels.json next to it)")
     ap.add_argument("--labels", type=_kv, action="append", default=[], metavar="ID=PATH",
                     help="COMPASS label map (.zarr, one integer channel) to serve (repeatable); "
                          "--images DIR picks these up by themselves")
@@ -107,15 +113,46 @@ def main(argv: list[str] | None = None) -> None:
         if k in paths:
             ap.error(f"id {k!r} given twice")
         paths[k] = v
-    opened = {k: ZarrPyramid(v, reader=a.reader) for k, v in paths.items()}
+    opened = {}
+    for k, v in paths.items():
+        try:
+            opened[k] = ZarrPyramid(v, reader=a.reader)
+        except ValueError as e:
+            ap.error(f"{k}: {e}")
     for k, _ in a.labels:
         if opened[k].role != "labels":
             ap.error(f"--labels {k}: not a label map (needs one integer channel)")
+    # a single integer channel is a label map only when it pairs with an image
+    # (--labels, --label-of, or a dotted name: slide / slide.tissue); else a one-channel image
+    explicit_maps = {k for k, _ in a.labels} | {k for k, _ in a.label_of}
+    for k, p in opened.items():
+        if p.role == "labels" and k not in explicit_maps and not any(
+                k.startswith(i + ".") and q.role == "image" for i, q in opened.items()):
+            p.as_image()
     images = {k: p for k, p in opened.items() if p.role == "image"}
     labels = {k: p for k, p in opened.items() if p.role == "labels"}
     for k, v in a.synthetic:
         w, _, h = v.partition("x")
         images[k] = SyntheticPyramid(int(w), int(h))
+    for k, v in a.synthetic_channels:
+        try:
+            w, h, n = (int(x) for x in v.split("x"))
+        except ValueError:
+            ap.error(f"--synthetic-channels {k}: expected WxHxN, e.g. 40000x30000x8")
+        images[k] = SyntheticChannels(w, h, n)
+    explicit_channels = dict(a.channels)
+    for k in explicit_channels:
+        if k not in images or images[k].display != "channels":
+            ap.error(f"--channels {k}: no such multichannel image")
+    for k, im in images.items():
+        if im.display != "channels":
+            continue
+        f = explicit_channels.get(k) or (channels_file_for(paths[k]) if k in paths else None)
+        if f:
+            try:
+                im.channel_defaults = load_channel_defaults(f, im.channels, 255 if im.dtype == "uint8" else 65535)
+            except (OSError, ValueError) as e:
+                ap.error(f"image {k}: {e}")
     for k, v in a.synthetic_labels:
         if v not in images:
             ap.error(f"--synthetic-labels {k}: no image {v!r}")
@@ -173,7 +210,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
     for k, p in images.items():
         what = (f"labels {k} ({p.dtype}, on {p.aligned_to}, "
-                f"{len(p.classes) if p.classes else 'no'} classes)" if p.role == "labels" else f"image {k}")
+                f"{len(p.classes) if p.classes else 'no'} classes)" if p.role == "labels"
+                else f"image {k} ({len(p.channels)} channels, {p.dtype})" if p.display == "channels" else f"image {k}")
         print(f"  {what}: {p.width}x{p.height}, {len(p.levels)} levels, tile {p.tile}, "
               f"fast path {sum(p.fast_levels)}/{len(p.levels)} levels", flush=True)
     for k, ds in datasets.items():

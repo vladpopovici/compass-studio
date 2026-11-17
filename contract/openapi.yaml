@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CompassStudio
-  version: 1.6.0
+  version: 1.7.0
   summary: Contract between the CompassStudio server and its browser client.
   description: |
     Frozen 2026-11-13 (decision log D2). Under `/api/v1` only backward-compatible
@@ -24,6 +24,10 @@ info:
     1.6.0 (2026-11-16, additive): save points of editable layers:
     `Layer.saved_revision` and `Layer.unsaved`, `POST /layers/{id}/save`,
     `POST /layers/{id}/discard`; capability `save`.
+    1.7.0 (2026-11-17, additive): multichannel images. `Image.display`
+    ("rgb" or "channels") and `Image.channel_defaults`; tiles of
+    multichannel images are `bin` with a `channel` query parameter (one raw
+    plane); `GET /images/{id}/histogram`; capability `channels`.
 
     Conventions:
     - Coordinates are level-0 pixels of the image; microns via `mpp`.
@@ -106,8 +110,16 @@ paths:
           Label maps (since 1.2.0): bin, the raw label values in the map's
           `dtype`, little-endian, row-major, tile width x height, gzip
           content-encoded when the request accepts it; png (grayscale) for
-          uint8 and uint16 maps. Other combinations return 400.
+          uint8 and uint16 maps. Multichannel images (`display: channels`,
+          since 1.7.0): bin only, one channel's raw values (uint8 or
+          uint16) laid out as for label maps. Other combinations return 400.
         schema: { type: string, enum: [jpg, webp, png, bin] }
+      - name: channel
+        in: query
+        description: |
+          Since 1.7.0. The channel (0-based index into `Image.channels`);
+          required for multichannel images, 400 for any other image.
+        schema: { type: integer, minimum: 0 }
       - name: q
         in: query
         description: JPEG quality (ignored for webp and png).
@@ -122,7 +134,8 @@ paths:
       tags: [images]
       summary: One image tile
       description: |
-        512 x 512 px, cropped at the right and bottom edges of a level. RGB.
+        512 x 512 px, cropped at the right and bottom edges of a level. RGB,
+        label values or one channel (see `format`).
         May carry a `Server-Timing` header (read, encode) for diagnostics.
         Since 1.1.0 responses carry an `ETag` (the image version) and a
         request with a matching `If-None-Match` gets 304.
@@ -137,6 +150,26 @@ paths:
             application/octet-stream: { schema: { type: string, format: binary } }
         "304":
           description: Not modified (since 1.1.0)
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /images/{image_id}/histogram:
+    parameters:
+      - $ref: "#/components/parameters/ImageId"
+    get:
+      tags: [images]
+      summary: Channel histograms of a multichannel image
+      description: |
+        Since 1.7.0. Computed once per image version from the finest level of
+        at most 2^20 pixels (or the coarsest level), for automatic contrast
+        and the channel panel. 400 for images that are not multichannel.
+      operationId: getImageHistogram
+      responses:
+        "200":
+          description: Histograms
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Histogram" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -682,7 +715,7 @@ components:
             Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
             annotations, events, edit (present when at least one store has a
             sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
-            tiles.area since 1.5.0; save since 1.6.0.
+            tiles.area since 1.5.0; save since 1.6.0; channels since 1.7.0.
             Clients ignore unknown values.
           type: array
           items: { type: string }
@@ -746,6 +779,53 @@ components:
         background:
           type: [integer, "null"]
           description: Label maps (since 1.2.0) - the value drawn transparent.
+        display:
+          type: string
+          enum: [rgb, channels]
+          description: |
+            Images (since 1.7.0; absent means rgb). rgb: 8-bit colour, tiles
+            as jpg, webp or png. channels: shown channel by channel (uint8 or
+            uint16), tiles as raw `bin` planes requested with `channel`.
+        channel_defaults:
+          description: |
+            Multichannel images (since 1.7.0) - display defaults per channel,
+            in `channels` order, from a viewer-side file; null when there is
+            none. Each field may be null (the client picks it).
+          type: [array, "null"]
+          items: { $ref: "#/components/schemas/ChannelDefault" }
+
+    ChannelDefault:
+      type: object
+      required: [color, min, max, visible]
+      properties:
+        color: { type: [string, "null"], pattern: "^#[0-9a-f]{6}$" }
+        min: { type: [number, "null"], description: "Value shown black." }
+        max: { type: [number, "null"], description: "Value shown at full colour." }
+        visible: { type: [boolean, "null"] }
+
+    Histogram:
+      type: object
+      required: [level, channels]
+      properties:
+        level: { type: integer, minimum: 0, description: "Pyramid level the values come from." }
+        channels:
+          type: array
+          items:
+            type: object
+            required: [min, max, counts, percentiles]
+            properties:
+              min: { type: number }
+              max: { type: number }
+              counts:
+                description: 256 counts over [min, max], equal-width bins.
+                type: array
+                items: { type: integer, minimum: 0 }
+              percentiles:
+                description: |
+                  Value at each percentile; keys "0.1", "0.5", "1", "2", "5",
+                  "50", "95", "98", "99", "99.5", "99.8", "99.9", "99.99".
+                type: object
+                additionalProperties: { type: number }
 
     LabelClass:
       type: object

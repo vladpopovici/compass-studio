@@ -60,6 +60,11 @@ export interface paths {
     "/images/{image_id}/tiles/{level}/{col}/{row}.{format}": {
         parameters: {
             query?: {
+                /**
+                 * @description Since 1.7.0. The channel (0-based index into `Image.channels`);
+                 *     required for multichannel images, 400 for any other image.
+                 */
+                channel?: number;
                 /** @description JPEG quality (ignored for webp and png). */
                 q?: number;
                 /**
@@ -79,7 +84,9 @@ export interface paths {
                  *     Label maps (since 1.2.0): bin, the raw label values in the map's
                  *     `dtype`, little-endian, row-major, tile width x height, gzip
                  *     content-encoded when the request accepts it; png (grayscale) for
-                 *     uint8 and uint16 maps. Other combinations return 400.
+                 *     uint8 and uint16 maps. Multichannel images (`display: channels`,
+                 *     since 1.7.0): bin only, one channel's raw values (uint8 or
+                 *     uint16) laid out as for label maps. Other combinations return 400.
                  */
                 format: "jpg" | "webp" | "png" | "bin";
             };
@@ -87,12 +94,37 @@ export interface paths {
         };
         /**
          * One image tile
-         * @description 512 x 512 px, cropped at the right and bottom edges of a level. RGB.
+         * @description 512 x 512 px, cropped at the right and bottom edges of a level. RGB,
+         *     label values or one channel (see `format`).
          *     May carry a `Server-Timing` header (read, encode) for diagnostics.
          *     Since 1.1.0 responses carry an `ETag` (the image version) and a
          *     request with a matching `If-None-Match` gets 304.
          */
         get: operations["getImageTile"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/images/{image_id}/histogram": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                image_id: components["parameters"]["ImageId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Channel histograms of a multichannel image
+         * @description Since 1.7.0. Computed once per image version from the finest level of
+         *     at most 2^20 pixels (or the coarsest level), for automatic contrast
+         *     and the channel panel. 400 for images that are not multichannel.
+         */
+        get: operations["getImageHistogram"];
         put?: never;
         post?: never;
         delete?: never;
@@ -526,7 +558,7 @@ export interface components {
              * @description Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
              *     annotations, events, edit (present when at least one store has a
              *     sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
-             *     tiles.area since 1.5.0; save since 1.6.0.
+             *     tiles.area since 1.5.0; save since 1.6.0; channels since 1.7.0.
              *     Clients ignore unknown values.
              */
             capabilities: string[];
@@ -577,6 +609,44 @@ export interface components {
             classes?: components["schemas"]["LabelClass"][] | null;
             /** @description Label maps (since 1.2.0) - the value drawn transparent. */
             background?: number | null;
+            /**
+             * @description Images (since 1.7.0; absent means rgb). rgb: 8-bit colour, tiles
+             *     as jpg, webp or png. channels: shown channel by channel (uint8 or
+             *     uint16), tiles as raw `bin` planes requested with `channel`.
+             * @enum {string}
+             */
+            display?: "rgb" | "channels";
+            /**
+             * @description Multichannel images (since 1.7.0) - display defaults per channel,
+             *     in `channels` order, from a viewer-side file; null when there is
+             *     none. Each field may be null (the client picks it).
+             */
+            channel_defaults?: components["schemas"]["ChannelDefault"][] | null;
+        };
+        ChannelDefault: {
+            color: string | null;
+            /** @description Value shown black. */
+            min: number | null;
+            /** @description Value shown at full colour. */
+            max: number | null;
+            visible: boolean | null;
+        };
+        Histogram: {
+            /** @description Pyramid level the values come from. */
+            level: number;
+            channels: {
+                min: number;
+                max: number;
+                /** @description 256 counts over [min, max], equal-width bins. */
+                counts: number[];
+                /**
+                 * @description Value at each percentile; keys "0.1", "0.5", "1", "2", "5",
+                 *     "50", "95", "98", "99", "99.5", "99.8", "99.9", "99.99".
+                 */
+                percentiles: {
+                    [key: string]: number;
+                };
+            }[];
         };
         LabelClass: {
             value: number;
@@ -853,6 +923,11 @@ export interface operations {
     getImageTile: {
         parameters: {
             query?: {
+                /**
+                 * @description Since 1.7.0. The channel (0-based index into `Image.channels`);
+                 *     required for multichannel images, 400 for any other image.
+                 */
+                channel?: number;
                 /** @description JPEG quality (ignored for webp and png). */
                 q?: number;
                 /**
@@ -872,7 +947,9 @@ export interface operations {
                  *     Label maps (since 1.2.0): bin, the raw label values in the map's
                  *     `dtype`, little-endian, row-major, tile width x height, gzip
                  *     content-encoded when the request accepts it; png (grayscale) for
-                 *     uint8 and uint16 maps. Other combinations return 400.
+                 *     uint8 and uint16 maps. Multichannel images (`display: channels`,
+                 *     since 1.7.0): bin only, one channel's raw values (uint8 or
+                 *     uint16) laid out as for label maps. Other combinations return 400.
                  */
                 format: "jpg" | "webp" | "png" | "bin";
             };
@@ -898,6 +975,30 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getImageHistogram: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                image_id: components["parameters"]["ImageId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Histograms */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Histogram"];
+                };
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
