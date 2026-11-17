@@ -130,6 +130,12 @@ class Firefox:
         await self.send("input.performActions", {"context": self.context, "actions": [
             {"type": "wheel", "id": "wheel", "actions": [{"type": "scroll", "x": x, "y": y, "deltaX": 0, "deltaY": dy}]}]})
 
+    async def chord(self, *keys: str):
+        """Press keys together (modifiers first), release in reverse order."""
+        actions = [{"type": "keyDown", "value": k} for k in keys] + [{"type": "keyUp", "value": k} for k in reversed(keys)]
+        await self.send("input.performActions", {"context": self.context, "actions": [
+            {"type": "key", "id": "kbd", "actions": actions}]})
+
 
 def _value(v: dict):
     t = v.get("type")

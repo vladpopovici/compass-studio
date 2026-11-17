@@ -22,6 +22,39 @@ export function useAnnotations(imageId: string | null) {
   const [styles, setStyles] = useState<Record<string, AnnStyle>>({});
   const [error, setError] = useState<string | null>(null);
   const sources = useRef(new Map<string, Sources>());
+  const current = useRef<{ imageId: string; ac: AbortController } | null>(null);
+
+  /** Sources for a layer's object types (new ones only: a type can appear after edits). */
+  const ensureSources = useCallback((l: LayerInfo, ac: AbortController) => {
+    const made = sources.current;
+    const s = made.get(l.id) ?? {};
+    made.set(l.id, s);
+    if (l.counts.polygon && !s.polygons) s.polygons = new PolygonSource(l);
+    const whole: ["points" | "lines", PointSource | LineSource][] = [];
+    if (l.counts.point && !s.points) whole.push(["points", (s.points = new PointSource(l))]);
+    if (l.counts.polyline && !s.lines) whole.push(["lines", (s.lines = new LineSource(l))]);
+    for (const [kind, src] of whole) {
+      const key = `${l.id}|${kind}`;
+      setLoads((o) => ({ ...o, [key]: { state: "loading" } }));
+      src.load(ac.signal).then(
+        () => setLoads((o) => ({ ...o, [key]: { state: "ready", count: src.count, groupCounts: src.groupCounts() } })),
+        (e: Error) => {
+          if (!ac.signal.aborted) setLoads((o) => ({ ...o, [key]: { state: "error", message: e.message } }));
+        });
+    }
+  }, []);
+
+  /** Stores and layers of an image, with sources for new layers. */
+  const fetchLayers = useCallback(async (id: string, ac: AbortController) => {
+    const mine = (await getJSON<Store[]>("stores")).filter((s) => s.aligned_to === id);
+    if (ac.signal.aborted) return null;
+    const ls = (await Promise.all(mine.map((s) => getJSON<LayerInfo[]>(`layers?store=${encodeURIComponent(s.id)}`)))).flat();
+    if (ac.signal.aborted) return null;
+    for (const l of ls) ensureSources(l, ac);
+    setStores(mine);
+    setLayers(ls);
+    return ls;
+  }, [ensureSources]);
 
   useEffect(() => {
     setStores([]);
@@ -29,51 +62,38 @@ export function useAnnotations(imageId: string | null) {
     setLoads({});
     setError(null);
     sources.current = new Map();
+    current.current = null;
     if (!imageId) return;
     const ac = new AbortController();
     const made = sources.current;
-    (async () => {
-      const mine = (await getJSON<Store[]>("stores")).filter((s) => s.aligned_to === imageId);
-      if (ac.signal.aborted) return;
-      setStores(mine);
-      const ls = (await Promise.all(mine.map((s) => getJSON<LayerInfo[]>(`layers?store=${encodeURIComponent(s.id)}`)))).flat();
-      if (ac.signal.aborted) return;
-      for (const l of ls) {
-        const s: Sources = {};
-        if (l.counts.polygon) s.polygons = new PolygonSource(l);
-        if (l.counts.point) s.points = new PointSource(l);
-        if (l.counts.polyline) s.lines = new LineSource(l);
-        made.set(l.id, s);
-      }
-      setLayers(ls);
-      for (const l of ls) {
-        const s = made.get(l.id)!;
-        for (const [kind, src] of [["points", s.points], ["lines", s.lines]] as const) {
-          if (!src) continue;
-          const key = `${l.id}|${kind}`;
-          setLoads((o) => ({ ...o, [key]: { state: "loading" } }));
-          src.load(ac.signal).then(
-            () => setLoads((o) => ({ ...o, [key]: { state: "ready", count: src.count, groupCounts: src.groupCounts() } })),
-            (e: Error) => {
-              if (!ac.signal.aborted) setLoads((o) => ({ ...o, [key]: { state: "error", message: e.message } }));
-            });
-        }
-      }
-    })().catch((e: Error) => {
+    current.current = { imageId, ac };
+    fetchLayers(imageId, ac).catch((e: Error) => {
       if (!ac.signal.aborted) setError(e.message);
     });
     return () => {
       ac.abort();
       for (const s of made.values()) s.polygons?.destroy();
     };
-  }, [imageId]);
+  }, [imageId, fetchLayers]);
+
+  /** Re-read stores and layers (after forks, new layers and edits: counts, revisions). */
+  const refresh = useCallback(async (): Promise<LayerInfo[]> => {
+    const c = current.current;
+    if (!c) return [];
+    return (await fetchLayers(c.imageId, c.ac)) ?? [];
+  }, [fetchLayers]);
 
   const setStyle = useCallback((id: string, s: AnnStyle) => setStyles((o) => ({ ...o, [id]: s })), []);
 
-  const layerStates: LayerState[] = useMemo(() => layers.map((info) => ({
+  // a store layer with an editable copy is not listed: the copy stands in for it
+  const listed = useMemo(() => {
+    const copied = new Set(layers.map((l) => l.forked_from).filter(Boolean));
+    return layers.filter((l) => !copied.has(l.id));
+  }, [layers]);
+  const layerStates: LayerState[] = useMemo(() => listed.map((info) => ({
     info, style: styles[info.id] ?? DEFAULT_ANN_STYLE,
     points: loads[`${info.id}|points`] ?? null, lines: loads[`${info.id}|lines`] ?? null,
-  })), [layers, styles, loads]);
+  })), [listed, styles, loads]);
   /** sources to draw with their styles, bottom first: polygons, then lines, then points of every layer */
   const drawn = useMemo(() => {
     const out: { source: AnnSource; style: AnnStyle }[] = [];
@@ -86,13 +106,14 @@ export function useAnnotations(imageId: string | null) {
       }
     return out;
   }, [layerStates]);
-  return { stores, layers: layerStates, drawn, setStyle, setStyles, error, sources };
+  return { stores, layers: layerStates, drawn, setStyle, setStyles, error, sources, refresh };
 }
 
 /** Attributes of the selected objects, fetched by id in batches of up to 1000 per layer. */
 export function useObjects(selection: ObjectPick[]) {
   const [objects, setObjects] = useState<Record<string, ObjectInfo | "error">>({});
   const asked = useRef(new Set<string>());
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     const want = new Map<string, number[]>();
     for (const p of selection) {
@@ -120,6 +141,16 @@ export function useObjects(selection: ObjectPick[]) {
           });
       }
     }
-  }, [selection]);
-  return objects;
+  }, [selection, tick]);
+  /** Forget objects' attributes (after edits): they are fetched again while selected. */
+  const invalidate = useCallback((keys: string[]) => {
+    for (const k of keys) asked.current.delete(k);
+    setObjects((o) => {
+      const n = { ...o };
+      for (const k of keys) delete n[k];
+      return n;
+    });
+    setTick((t) => t + 1);
+  }, []);
+  return { objects, invalidate };
 }

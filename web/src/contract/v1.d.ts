@@ -337,8 +337,57 @@ export interface paths {
         /**
          * Copy a read-only store layer into the sidecar as an editable layer
          * @description Advances the store revision. Can take seconds for large layers.
+         *     Forked objects keep their ids, so a layer can be forked once; a
+         *     second fork, or a name already used in the sidecar, is a 422.
          */
         post: operations["forkLayer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/layers/{layer_id}/save": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make an editable layer's current state its save point
+         * @description Since 1.6.0. Advances the store revision (logged with an empty inverse).
+         */
+        post: operations["saveLayer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/layers/{layer_id}/discard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revert an editable layer to its save point
+         * @description Since 1.6.0. Commits, in one batch, the inverses of the layer's
+         *     operations after its save point (newest first), and makes the result
+         *     the save point. The batch is logged like any commit, so committing
+         *     its logged `inverse` brings the edits back.
+         */
+        post: operations["discardLayer"];
         delete?: never;
         options?: never;
         head?: never;
@@ -477,7 +526,7 @@ export interface components {
              * @description Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
              *     annotations, events, edit (present when at least one store has a
              *     sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
-             *     tiles.area since 1.5.0.
+             *     tiles.area since 1.5.0; save since 1.6.0.
              *     Clients ignore unknown values.
              */
             capabilities: string[];
@@ -572,6 +621,10 @@ export interface components {
             /** @description Highest tile level returning polygons; centroids above. */
             polygon_max_level: number;
             revision: number;
+            /** @description Editable layers, since 1.6.0. Store revision of the layer's save point (its creation or fork, or the last save). */
+            saved_revision?: number;
+            /** @description Editable layers, since 1.6.0. Number of committed batches that changed the layer after its save point. */
+            unsaved?: number;
         };
         /** @description GeoJSON geometry in level-0 px. Edits accept Point, LineString, Polygon. */
         Geometry: {
@@ -1121,6 +1174,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Layer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Invalid"];
+        };
+    };
+    saveLayer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The layer, with `unsaved` 0 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Layer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    discardLayer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                layer_id: components["parameters"]["LayerId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Client label for the logged batch; `{reverted}` in it is replaced by the reverted revisions, newest first, comma-separated. */
+                    client?: string | null;
+                };
+            };
+        };
+        responses: {
+            /** @description Reverted (or nothing to revert) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        layer_id: string;
+                        revision: number;
+                        /** @description Revisions whose changes to the layer were reverted, oldest first. */
+                        reverted: number[];
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];

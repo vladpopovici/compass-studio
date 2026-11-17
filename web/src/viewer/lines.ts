@@ -55,6 +55,10 @@ export class LineSource implements AnnSource {
   count = 0;
   private byGroup: GroupPaths[] = [];
   private counts: number[] = [];
+  private raw: { ids: BigInt64Array; groups: Uint16Array; offsets: Int32Array; values: Float32Array } | null = null;
+  private hidden: ReadonlySet<number> = new Set();
+  private hiddenVersion = 0;
+  onChange?: () => void;
 
   constructor(readonly info: LayerInfo) {}
 
@@ -74,9 +78,34 @@ export class LineSource implements AnnSource {
     const ids = table.getChild("object_id")!.toArray() as BigInt64Array;
     const groups = table.getChild("group")!.toArray() as Uint16Array;
     const { offsets, values } = listColumn<Float32Array>(table, "coords");
+    this.raw = { ids, groups, offsets, values };
+    this.counts = this.info.groups.map(() => 0);
+    for (let i = 0; i < n; i++) this.counts[groups[i]]++;
+    this.count = n;
+    this.build();
+    this.loaded = true;
+  }
+
+  /** Objects drawn by the edit overlay instead. */
+  setHidden(ids: ReadonlySet<number>, version: number) {
+    if (version === this.hiddenVersion) return;
+    this.hidden = ids;
+    this.hiddenVersion = version;
+    if (this.raw) {
+      this.build();
+      this.onChange?.();
+    }
+  }
+
+  /** Paths per group, without hidden objects. */
+  private build() {
+    const { ids, groups, offsets, values } = this.raw!;
+    const n = ids.length, hidden = this.hidden;
+    const skip = (i: number) => hidden.size > 0 && hidden.has(Number(ids[i]));
     const k = this.info.groups.length;
     const nPaths = new Array(k).fill(0), nVerts = new Array(k).fill(0);
     for (let i = 0; i < n; i++) {
+      if (skip(i)) continue;
       nPaths[groups[i]]++;
       nVerts[groups[i]] += (offsets[i + 1] - offsets[i]) / 2;
     }
@@ -85,6 +114,7 @@ export class LineSource implements AnnSource {
       objectIds: new Float64Array(nPaths[g]), count: 0,
     }));
     for (let i = 0; i < n; i++) {
+      if (skip(i)) continue;
       const p = out[groups[i]], v = p.starts[p.count];
       p.positions.set(values.subarray(offsets[i], offsets[i + 1]), 2 * v);
       p.objectIds[p.count] = Number(ids[i]);
@@ -92,9 +122,6 @@ export class LineSource implements AnnSource {
       p.starts[p.count] = v + (offsets[i + 1] - offsets[i]) / 2;
     }
     this.byGroup = out.filter((p) => p.count > 0);
-    this.counts = nPaths;
-    this.count = n;
-    this.loaded = true;
   }
 
   groupCounts(): number[] {

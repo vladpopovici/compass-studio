@@ -3,8 +3,8 @@
 CompassStudio shows COMPASS whole-slide images and their label maps in the
 browser. A local Python server reads the files; the browser only talks to
 that server. This guide covers every command and the viewer's controls. It
-describes what is implemented now (milestones 1 to 6: images, label maps,
-and point, polygon and polyline annotations with picking); editing and
+describes what is implemented now (milestones 1 to 7: images, label maps,
+point, polygon and polyline annotations with picking, and editing them);
 multichannel images come later.
 
 ## 1. Requirements
@@ -65,7 +65,7 @@ Stop the server with Ctrl+C.
 |---|---|
 | `--host HOST`, `--port PORT` | address to listen on; default `127.0.0.1:8765`. |
 | `--allow-other-interfaces` | required to listen on anything but 127.0.0.1. Slides may be sensitive: prefer an SSH tunnel (below). |
-| `--allow-origin ORIGIN` | an extra allowed browser origin, e.g. the development server (section 8). |
+| `--allow-origin ORIGIN` | an extra allowed browser origin, e.g. the development server (section 9). |
 | `--web DIR` | the built client to serve at `/` (normally `../web/dist`). Without it only the API is served. |
 | `--tile-threads N` | threads that read and encode tiles; default one per available CPU. |
 | `--reader {auto,zarr}` | `auto` (default) uses the fast direct shard reader where possible; `zarr` forces zarr-python. |
@@ -96,7 +96,7 @@ width is remembered in this browser.
   under it (layer, group, id) and the label values under it.
 - Click a point, polygon or polyline: select it and show it in the
   inspector. Shift+click: add or remove one. Click on empty space: clear
-  the selection.
+  the selection. With a drawing tool, clicks draw instead (section 7).
 
 ### Keys
 
@@ -109,9 +109,15 @@ width is remembered in this browser.
 | PageDown / PageUp | next / previous image |
 | `l` | show or hide all label maps |
 | `o` | label maps as outlines or filled |
-| Esc | clear the selection |
+| `g` | lock the layer of the last selected object as the working layer; again to release it |
+| Esc | leave the current edit tool; with the select tool, clear the selection |
 | `[` | show or hide the sidebar |
 | `]` | show or hide the inspector |
+
+Editing keys (section 7) when the server can edit: `v` select, `e` edit
+shapes, `p` polygon, `d` freehand, `r` rectangle, `c` ellipse, `x` point,
+`n` line; Delete (or Backspace) deletes the selection; Ctrl+Z undoes,
+Ctrl+Shift+Z or Ctrl+Y redoes.
 
 Keys do nothing while a text field or list has focus.
 
@@ -190,7 +196,7 @@ each layer holds objects (points, polygons, lines) sorted into groups
 **points, polygons and polylines**; other types (point sets, circles) are
 listed but not drawn yet. The server never writes a store; unless `--read-only` is given it creates
 an edit database `<ID>.curation.sqlite` next to it (or in `--sidecar-dir`),
-used by editing in a later version.
+which holds editable layers (section 7).
 
 ### Pairing with a slide
 
@@ -237,6 +243,20 @@ layers:
 - One row per group: checkbox (show or hide), colour swatch (click to pick
   a colour; points, fills, outlines and lines use it) and the number of
   points and polylines.
+- Lock button (right of the layer name): make the layer the working layer.
+
+**Working layer.** When one layer covers another (tissue regions over the
+morphology regions or cells inside them), lock the layer you want to work
+on: click the lock on its card, or select one of its objects and press
+`g`. Its objects are then drawn above every other layer, and they are the
+only objects you can hover or select; all other layers are dimmed to 35 %
+of their opacity. Locking also shows the layer if it was hidden, drops
+selected objects of other layers, and (when the server can edit) sets
+"Into" to it. The card gets an accent frame, and a chip "Working in:
+layer" appears at the top of the image (in the edit tool bar when editing
+is available); its cross, the lock again or `g` releases the layer. There
+is one working layer at a time; it follows its layer to an editable copy
+and is released when you switch slides.
 
 **Level of detail.** Each polygon is drawn by its size on screen: when its
 bounding box covers at least Shapes × Shapes screen pixels (by area), it is
@@ -258,7 +278,8 @@ the server's memory (under 1 s). Group toggles and colour changes apply at
 once. Point layers with more than 128 groups draw every group (toggles are
 off).
 
-Drawing order: polygons of all layers, then polylines, then points.
+Drawing order: polygons of all layers, then polylines, then points; the
+working layer, if one is locked, above all of them.
 
 ### The inspector
 
@@ -272,9 +293,93 @@ excluded from the area; the perimeter counts every ring) or the length of
 a polyline (in µm² and µm, or px² and px for images without a
 calibration), and its attributes (numbers stored with the object;
 fetched from the server when selected). "Clear" empties the selection; the
-cross on a card removes that object.
+cross on a card removes that object. When the server can edit, the group
+and the attributes are editable here (section 7).
 
-## 7. Test data
+## 7. Editing annotations
+
+Editing needs a server started without `--read-only`; the edit tools then
+appear at the top of the image. Every action is saved at once (there is no
+Save button and nothing to lose); each saved action can be undone.
+
+**Where edits go.** The annotation store itself is never changed. Edits go
+to layers in the curation database (`<ID>.curation.sqlite`): new layers,
+and editable copies of store layers. A layer with edits not yet saved is
+shown as "<name> (editable)" on a dark grey card, with the number of
+unsaved edits and two buttons:
+
+- **Save edits**: the edited layer becomes the layer: the card is plain
+  "<name>" again, and from then on there is one layer of that name (the
+  store's version is no longer listed). Further edits make it
+  "(editable)" again until the next save.
+- **Discard edits**: after a confirmation, reverts the layer to its last
+  save point (everyone's edits since, not only yours). Redo brings them
+  back.
+
+Edits are stored as soon as they are made either way: "Save edits" marks
+the point that "Discard edits" returns to.
+
+- **New layer**: in the "Into" picker of the edit tools, choose "New
+  layer…", give a name and the group names (comma-separated, in order).
+  Layer names are unique within a store.
+- **Editing a store layer**: the first edit of an object in a read-only
+  layer (drawing into it, editing a shape, deleting, changing a group or
+  an attribute) asks to make an editable copy. The copy, "<name>
+  (editable)", takes the layer's place in the list (the store's version is
+  not listed beside it), keeps the objects' ids, groups and style, and
+  the edit is applied to it. A layer is copied once. Copying a million
+  objects takes about 10 seconds.
+
+**Tools** (hover a tool for help; keys in brackets):
+
+| Tool | Key | Use |
+|---|---|---|
+| Select | `v` | click to select, Shift+click to add or remove |
+| Edit shapes | `e` | edit the selected objects (up to 50, of one layer): drag a vertex; click or drag an edge to add a vertex; Alt+click a vertex to remove it; drag inside an object to move it |
+| Polygon | `p` | click the vertices; double-click, Enter or a click on the first vertex finishes; Backspace removes the last vertex; Esc cancels |
+| Freehand | `d` | drag to trace an outline (simplified to about one screen pixel) |
+| Rectangle | `r` | drag from corner to corner |
+| Ellipse | `c` | drag across its bounding box (saved as a 64-sided polygon) |
+| Point | `x` | click |
+| Line | `n` | click the vertices; double-click or Enter finishes (the length so far is shown) |
+
+New objects go into the layer and group chosen in "Into" (a read-only
+layer is copied first, as above) and are selected when saved. "Into"
+follows the selection: selecting an object sets it to that object's layer
+and group, so the next object drawn goes next to it. With a working layer
+locked (section 6), only its objects can be selected and edited, and new
+objects go into it.
+
+**Other actions**
+
+- Delete (or Backspace, or the bin button): delete the selected objects.
+- Group: change it in the inspector, for one object or, in the "All N
+  selected" block, for every selected object of one layer.
+- Attributes: edit a value in the inspector and press Enter (an empty
+  value removes it; so does the cross that appears on hover); "attribute"
+  and "value" below add one (names known to the stores are suggested); the
+  "All N selected" block sets one on every selected object.
+- Undo (Ctrl+Z) and redo (Ctrl+Shift+Z or Ctrl+Y, or the arrow buttons):
+  step back and forth through your saved actions. The history is kept by
+  the server, so it survives reloads (per browser). Undo applies the
+  inverse of the action to the objects as they are now: if someone else
+  changed the same object since, their change can be reverted too.
+- Discard changes (tool bar): reverts every edit you made since the slide
+  was opened (or the page reloaded), in every layer, after a
+  confirmation, as one step; Redo brings them all back. Edits by others,
+  and your edits from before opening, are kept (use Undo for those).
+  "Discard edits" on a layer card instead returns that layer to its last
+  save point.
+
+**Refused edits.** Polygons whose outline crosses itself, has no area or
+fewer than 3 points, and lines with fewer than 2 points are not saved; a
+message says why and the shape returns to its last saved form.
+
+**Changes by others.** Another program writing the same curation database
+(or another browser on the same server) is seen within a second or two:
+changed objects are redrawn without a reload.
+
+## 8. Test data
 
 Keep generated data under `data/` (it is not committed).
 
@@ -303,7 +408,7 @@ Without any slide at hand:
 
     uv run compass-studio-serve --synthetic big=200000x200000 --synthetic-labels big.lab=big --web ../web/dist
 
-## 8. Development
+## 9. Development
 
 - Client with hot reload: start the server with
   `--allow-origin http://127.0.0.1:5173`, then in `web/` run `pnpm dev`
@@ -317,13 +422,18 @@ Without any slide at hand:
   with a layer of 1,000 points or more, polygons with 100 or more, such as
   the store above):
 
-      uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR]
+      uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR] [--edit]
+
+  `--edit` also tests editing on the store of the largest polygon layer.
+  It writes to the curation databases (a new layer per run, a copy of a
+  store layer), so start that server with `--sidecar-dir` pointing at a
+  scratch directory, never at real curation databases.
 
 - Benchmark pages: `bench.html` on the same server; see `spikes/README.md`.
 - `?debug` in the viewer's address exposes the viewer as `window.__cs` for
   measurements in the browser console.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 - **"Session token missing or wrong"**: open the exact URL the server
   printed, including `#token=…`; the token changes at every restart unless
@@ -337,6 +447,11 @@ Without any slide at hand:
 - **The server refuses an annotation store** (size mismatch or "which
   image does it belong to?"): name it after its slide or pass
   `--annotations-of` (section 6).
+- **No edit tools above the image**: the server runs with `--read-only`,
+  or the slide has no annotation store; "This store cannot be edited"
+  means the same.
+- **"Not saved: …"**: the server refused the edit (for example a
+  self-crossing outline); nothing was changed.
 - **An annotation store does not appear in the Layers tab**: the start-up
   lines show which image it is on ("annotations X (on SLIDE)"); a store
   without "on" pairs with nothing.

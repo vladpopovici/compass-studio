@@ -14,6 +14,10 @@
 // Colours live in their own attribute buffer; a colour change rewrites and
 // re-uploads only that buffer (a new descriptor object for `getFillColor`,
 // plus `colorVersion` in updateTriggers).
+//
+// Objects changed by edits (milestone 7) are hidden here and drawn by the
+// edit overlay: a 0/1 filter value per point (DataFilterExtension value
+// filter, range [-0.5, 0.5]), present only while something is hidden.
 
 import { DataFilterExtension } from "@deck.gl/extensions";
 import { ScatterplotLayer } from "@deck.gl/layers";
@@ -30,6 +34,8 @@ class GroupFilter extends DataFilterExtension {
   }
 }
 const EXTENSIONS = [new GroupFilter({ categorySize: 1 })];
+const EXTENSIONS_HIDE = [new GroupFilter({ categorySize: 1, filterSize: 1 })];
+const HIDE_ONLY = [new DataFilterExtension({ filterSize: 1 })];
 
 /** Positions, groups and ids of points (or polygon centres), drawn as one ScatterplotLayer. */
 export class PointBuffers {
@@ -38,6 +44,11 @@ export class PointBuffers {
   private colorKey = "";
   private colorVersion = 0;
   private data: { length: number; attributes: Record<string, object> };
+  private hiding = false;
+  private hideVersion = -1;
+  private hideCount = 0;
+  /** point indices sorted by object id, made on first hide */
+  private order: Uint32Array | null = null;
 
   constructor(readonly info: LayerInfo, readonly deckId: string, readonly kind: ObjectKind,
               readonly positions: Float32Array, readonly groups: Uint32Array,
@@ -57,6 +68,43 @@ export class PointBuffers {
 
   objectId(index: number): number {
     return Number(this.objectIds[index]);
+  }
+
+  /** Index of an object id, or -1. */
+  indexOf(id: number): number {
+    if (!this.order) {
+      const ids = Float64Array.from(this.objectIds as ArrayLike<number>, Number);
+      this.order = Uint32Array.from({ length: this.count }, (_, i) => i).sort((a, b) => ids[a] - ids[b]);
+    }
+    let lo = 0, hi = this.count - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1, v = this.objectId(this.order[mid]);
+      if (v === id) return this.order[mid];
+      if (v < id) lo = mid + 1; else hi = mid - 1;
+    }
+    return -1;
+  }
+
+  /** Hide these objects (edited ones, drawn by the overlay); `version` changes with the set. */
+  setHidden(ids: ReadonlySet<number>, version: number) {
+    if (version === this.hideVersion) return;
+    this.hideVersion = version;
+    if (!ids.size && !this.hiding) return;
+    const v = new Float32Array(this.count);
+    let n = 0;
+    for (const id of ids) {
+      const i = this.indexOf(id);
+      if (i >= 0) { v[i] = 1; n++; }
+    }
+    this.hiding = n > 0;
+    this.hideCount++;
+    if (this.hiding) this.data.attributes.getFilterValue = { value: v, size: 1 };
+    else delete this.data.attributes.getFilterValue;
+  }
+
+  /** Is this deck layer id these buffers' layer? */
+  owns(deckLayerId: string): boolean {
+    return deckLayerId === this.deckId;
   }
 
   pick(index: number): ObjectPick {
@@ -94,6 +142,7 @@ export class PointBuffers {
     const filter = this.info.groups.length <= MAX_FILTER_GROUPS;
     const hidden = new Set(style.hidden);
     const shown = this.info.groups.map((g) => g.index).filter((i) => !hidden.has(i));
+    const ext = this.hiding ? (filter ? EXTENSIONS_HIDE : HIDE_ONLY) : filter ? EXTENSIONS : null;
     return new ScatterplotLayer({
       id: this.deckId,
       data: this.data as never,
@@ -107,8 +156,10 @@ export class PointBuffers {
       getRadius: style.sizes[band] / 2 / mpp,
       radiusMinPixels: 0.5,
       stroked: false,
-      updateTriggers: { getFillColor: this.colorVersion },
-      ...(filter ? { extensions: EXTENSIONS, filterCategories: shown } : {}),
+      updateTriggers: { getFillColor: this.colorVersion, getFilterValue: this.hideCount },
+      ...(ext ? { extensions: ext } : {}),
+      ...(filter ? { filterCategories: shown } : {}),
+      ...(this.hiding ? { filterRange: [-0.5, 0.5] } : {}),
     });
   }
 }
@@ -117,6 +168,7 @@ export class PointBuffers {
 export class PointSource implements AnnSource {
   buffers: PointBuffers | null = null;
   revision = 0;
+  private hidden: [ReadonlySet<number>, number] = [new Set(), 0];
   timing: { fetchMs: number; buildMs: number; bytes: number } | null = null;
 
   constructor(readonly info: LayerInfo) {}
@@ -155,6 +207,7 @@ export class PointSource implements AnnSource {
     }
     this.buffers = new PointBuffers(this.info, `points-${this.info.id}`, "point", positions, Uint32Array.from(gs),
                                     col("object_id") as BigInt64Array);
+    this.buffers.setHidden(...this.hidden);
     this.revision = Number(table.schema.metadata.get("revision") ?? 0);
     this.timing = { fetchMs: t1 - t0, buildMs: performance.now() - t1, bytes: buf.byteLength };
     return this.timing;
@@ -164,11 +217,16 @@ export class PointSource implements AnnSource {
     return this.buffers?.groupCounts() ?? [];
   }
 
+  setHidden(ids: ReadonlySet<number>, version: number) {
+    this.hidden = [ids, version];
+    this.buffers?.setHidden(ids, version);
+  }
+
   layers(ctx: DrawContext) {
     return this.buffers ? [this.buffers.layer(ctx)] : [];
   }
 
   pick(deckLayerId: string, index: number): ObjectPick | null {
-    return this.buffers && deckLayerId === this.buffers.deckId ? this.buffers.pick(index) : null;
+    return this.buffers?.owns(deckLayerId) ? this.buffers.pick(index) : null;
   }
 }

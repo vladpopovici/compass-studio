@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 6 done (2026-11-15); next is milestone 7. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 7 done (2026-11-16); next is milestone 8. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -108,7 +108,14 @@ later because the client depends only on the contract (D2).
   at any level) or `max_area` (centroids at any level), filters on the
   R-tree bounding-box area; capability `tiles.area`. `ObjectInfo.area`
   (polygons) and `ObjectInfo.length` (perimeter or polyline length), in
-  level-0 px units, computed when objects are fetched.
+  level-0 px units, computed when objects are fetched. Duplicate layer
+  names and a second fork of a layer are 422 (were 500): forked objects
+  keep their ids, so a layer can be forked once.
+  1.6.0 (2026-11-16, milestone 7, additive): save points of editable
+  layers: `Layer.saved_revision`, `Layer.unsaved` (batches that changed
+  the layer since), `POST /layers/{id}/save`, `POST /layers/{id}/discard`
+  (the inverses since the save point in one logged batch; `{reverted}` in
+  its client label names the revisions); capability `save`.
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -282,6 +289,21 @@ the owner in normal use. Details: `docs/spikes/S2.md` (milestone 3).
   pick 5 to 7 ms p95. First zoomed-out view: 3.8 s for the one centroid
   tile holding 1M cells (server query), level 6 view 1.4 s, zoomed-in
   views 0.1 to 0.7 s.
+  Outline rings arrive unclosed (`polygon-tile` v1); deck closes
+  `_pathType: "loop"` paths only when it normalizes them, which it skips
+  for binary data, so the last edge was missing (fixed 2026-11-17): the
+  client draws outlines from a copy of the rings with the first vertex
+  repeated.
+- Working layer (2026-11-17, chosen by the owner, because a layer such
+  as tissue can cover another, such as morphology, and block selecting
+  it): one locked annotation layer per slide, set by a lock on its card
+  in the layers panel or `g` (the selected object's layer). The viewer
+  draws that layer's deck layers after all others and clones every other
+  annotation layer's deck layers dimmed to 35 % and unpickable; sources
+  are unchanged. Rejected: a lock beside "Into" (only when editing, and
+  Into could no longer follow the selection), and leaving other layers
+  at full opacity. A first version locked a single class (group within
+  a layer); the owner corrected it to whole layers.
 - Groups and layers: client-side GPU filtering on layer and group attributes.
   S3 (2026-11-13): points use DataFilterExtension categories (group ids
   rebased to 0..k-1; at most 128 groups per layer). Polygons use one layer
@@ -328,6 +350,57 @@ frozen schema document is needed from the COMPASS side (section 8).
   ids at or above 2^40); objects created in the sidecar get ids from 2^40.
   Forking and creating layers advance the revision and appear in the log
   (empty inverse).
+- **Milestone 7 (2026-11-16)**, chosen by the owner from options: every
+  action commits at once (one batch, against the latest known revision;
+  a 409 is retried on the new revision, so concurrent writers are last
+  writer wins per object); rejected: an edit session with Save (unsaved
+  work, late conflicts) and merging quick successive edits (more logic).
+  The first edit of a read-only layer asks to fork it (a layer is forked
+  once, since forked objects keep their ids); the fork takes the
+  original's name and style and its place in the list (a store layer with
+  a fork is not listed), and the selection moves to the fork.
+  Save points (2026-11-16, at the owner's request: forks lengthened the
+  list and read as duplicates): each editable layer has a save point
+  (creation, fork or "Save edits"); with edits after it the layer shows
+  as "<name> (editable)" on a dark grey card with "Save edits" (new save
+  point: one layer of that name from then on) and "Discard edits"
+  (revert to the save point, one batch that Redo restores). Chosen over
+  writing the edits back into the COMPASS store, which stays read-only
+  (merge-back remains an open item), and over deferring merging. Tools: select, edit shapes (vertex
+  drag, edge click or drag to add, Alt+click to remove (editable-layers
+  removes on a plain click, too easy by accident), drag inside to move),
+  polygon, freehand (Douglas-Peucker to about 1 screen px), rectangle and
+  ellipse (drag; the ellipse is drawn as a box and saved as a 64-gon,
+  since editable-layers' ellipse mode is geodesic), point, line. Group and
+  attributes are edited in the inspector, per object or for the whole
+  selection. Added at the owner's request: "Into" (layer and group for
+  new objects) follows the last selected object; "Discard changes"
+  reverts this browser's edits since the slide was opened, one batch per
+  store (the inverses, newest first; label `:undo:<rev>,<rev>,…`), so it
+  is one undo step that Redo restores (chosen over resetting a fork to
+  its source and over cancelling only the edit in progress).
+  How changes reach the view (refines the edit buffer above): bulk layers
+  are never refetched for edits. On every new revision (own commits and
+  server-sent events alike) the client reads the log since its last
+  revision, collects the objects touched, fetches their current GeoJSON
+  (`/features`) and keeps them as overrides per store; overridden and
+  checked-out objects are hidden in the editable layers' bulk sources
+  (points: a 0/1 value filter; polygons: skipped when tiles are merged;
+  polylines: rebuilt without them) and drawn by an overlay layer per
+  editable layer (GeoJsonLayer). So any writer, not only this client, is
+  shown correctly, and tiles never go stale. Undo and redo commit the
+  logged inverse; redo inverts the undo commit, so recreated objects keep
+  their ids. Commits carry a per-browser client label (`:undo:<rev>`,
+  `:redo:<rev>` added), from which the stacks are rebuilt on load, so
+  they survive reloads. Validity (self-crossing rings, no area, too few
+  points) is checked before sending; the server's 422 is reported and
+  the shape reverts.
+  Measured (workstation, headless Firefox, 4 server CPUs, store with 300k
+  points and 300k cells, end-to-end test): commit to view updated 8 to
+  15 ms p50, the slowest of 17 per run 47 to 108 ms (4 runs; which commit
+  is slow is not yet identified, so the 100 ms budget holds at the median
+  but not always); check-out 2 to 7 ms; a 30-region fork under 1 s, 300k
+  points about 2 s.
 - **Editing library**: `@deck.gl-community/editable-layers` (successor of
   nebula.gl). Its repository is flagged semi-maintained and it does not support
   deck.gl's WebGPU path, which is acceptable under D5. Verified by S5
@@ -360,8 +433,8 @@ fonts only. Keyboard: arrows, `+`/`-`, `0`/`f` fit, `1` actual pixels,
 PageUp/PageDown images; the view is kept in the URL query.
 Milestone 5 (2026-11-13): tabbed sidebars instead of dockview: a left
 sidebar (tabs Layers and Labels) and a right inspector, both collapsible
-(`[`, `]`) and resizable. dockview is deferred to milestone 7, when the
-annotation table and minimap need free docking. Selection: click, Shift+click
+(`[`, `]`) and resizable. dockview is deferred until the annotation table
+and minimap need free docking (they were not part of milestone 7). Selection: click, Shift+click
 to add, Esc to clear; hover names the point in the status bar.
 
 ### D10. Security and privacy
@@ -406,11 +479,18 @@ baseline (D5).
 5. Points: layer view, picking, attribute panel. Done 2026-11-13.
 6. Polygons with level of detail. Done 2026-11-15 (polylines included).
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
-   undo and redo, commits with revisions.
+   undo and redo, commits with revisions. Done 2026-11-16.
 8. Multichannel.
 9. Packaging (one command to serve a slide) and documentation.
 
 ## 8. Open items
+
+- Editing (milestone 7), not measured: hiding edited objects in a forked
+  multi-million point layer (the first hide sorts the ids, then each
+  change rewrites one float per point); edits on a forked 1M-cell layer
+  in the viewer; the laptop and Chromium. Many overrides (thousands of
+  edits in one session) are drawn by the overlay without a limit; a
+  reload resets them into the bulk data.
 
 - License.
 - Frozen COMPASS annotation-schema document (ideally in the COMPASS repository).

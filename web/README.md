@@ -9,11 +9,14 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 - `index.html`, `src/app/`: the application: image picker, pan/zoom
   viewer, sidebar with annotation layers (milestones 5 and 6) and label
   maps (milestone 4), inspector for selected objects, status bar with
-  coordinates, level, object and label under the cursor and scale bar.
+  coordinates, level, object and label under the cursor and scale bar;
+  editing (milestone 7: `editing.ts` commits, sync from the log, undo and
+  forks; `EditBar.tsx` tools and dialogs).
 - `src/viewer/`: the framework-free viewer core (deck.gl `Deck`,
   OrthographicView, image tiles, label maps; annotation sources for points,
-  polygons with level of detail and polylines, sharing `annstyle.ts`). The
-  application and the benches use it.
+  polygons with level of detail and polylines, sharing `annstyle.ts`;
+  `edits.ts` overlay and editor layer, `geometry.ts` checks and clean-up).
+  The application and the benches use it.
 - `src/components/ui/`: shadcn/ui components (copied, trimmed).
 - `bench.html`, `src/bench/`: spike benches S2, S3 and S5 (see `spikes/`).
 - `e2e/`: end-to-end smoke test in headless Firefox over WebDriver BiDi.
@@ -36,7 +39,10 @@ Development with hot reload: start the server with
 
 With a server running on the built client and at least one image:
 
-    cd ../server && uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 <token>
+    cd ../server && uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 <token> [--edit]
+
+`--edit` also tests editing; it writes to the curation databases, so run
+that server with a scratch `--sidecar-dir`.
 
 It needs Firefox on the PATH and nothing else (`websockets` comes with the
 server environment).

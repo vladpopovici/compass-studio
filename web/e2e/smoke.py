@@ -10,8 +10,16 @@ label maps: the panel, label values under the cursor, `l` and class toggles.
 If it has a point layer with at least 1000 points: hover, click selection
 and the inspector's attributes, Shift+click, Esc, and group toggles. If it
 has a polygon layer with at least 100 polygons: shapes zoomed in (hover,
-click, inspector, outline and fill controls) and centres zoomed out; with
-a polyline layer, its line width control.
+click, inspector, outline and fill controls, the outline's closing edge,
+the working layer: lock, chip, `g`, drawing order, dimming and picking)
+and centres zoomed out; with a polyline layer, its line width control.
+
+With ``--edit`` (start the server with ``--sidecar-dir`` pointing at a
+scratch directory: the test writes to the curation databases), editing on
+the store of the largest polygon layer: a new layer, every drawing tool,
+undo and redo, vertex editing and moving, group and attribute changes,
+deleting, a commit by another client arriving through the event stream,
+forking a read-only layer on first edit, and the undo stack after a reload.
 """
 
 import argparse
@@ -19,6 +27,7 @@ import asyncio
 import json
 import pathlib
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -212,6 +221,8 @@ async def check_polygons(ff, check, shots):
     await asyncio.sleep(0.3)
     check(not await ff.eval(f"{POLYS}.querySelector('[aria-label=\"Outlines\"]').checked"), "outline toggles off")
     await ff.eval(f"{POLYS}.querySelector('[aria-label=\"Outlines\"]').click(), 1")
+    await check_outline_closed(ff, check, layer)
+    await check_working_layer(ff, check, shots, layer)
     lines = await ff.eval("[...document.querySelectorAll('[data-lines]')].filter(e => +e.dataset.lines > 0).length")
     if lines:
         check(await ff.eval("[...document.querySelectorAll('[data-lines]')].filter(e => +e.dataset.lines > 0)"
@@ -220,6 +231,405 @@ async def check_polygons(ff, check, shots):
     await asyncio.sleep(1)
     await click_buttons(ff, "All")
     await asyncio.sleep(0.5)
+
+
+OUTLINE_PICK = """((L) => {
+  const src = window.__cs.ann.sources.current.get(L).polygons, v = window.__cs.viewer, vp = v.deck.getViewports()[0];
+  for (const s of src.shapes) {
+    const r = s.rings, P = r.positions;
+    for (let i = 0; i < r.count; i++) {
+      const a = r.starts[i], b = r.starts[i + 1] - 1;
+      if (b - a < 2) continue;
+      const [ax, ay] = vp.project([P[2 * a], P[2 * a + 1]]), [bx, by] = vp.project([P[2 * b], P[2 * b + 1]]);
+      const x = (ax + bx) / 2, y = (ay + by) / 2;
+      if (x < 20 || y < 20 || x > vp.width - 20 || y > vp.height - 20 || Math.hypot(ax - bx, ay - by) < 12) continue;
+      // the middle of the edge, away from the neighbouring edges' rounded ends
+      const got = [0.35, 0.5, 0.65].map(t => v.pickAt(ax + t * (bx - ax), ay + t * (by - ay))?.objectId ?? null);
+      const fills = v.deck.props.layers.filter(l => /^poly-.*-\\d+$/.test(l.id)).length;
+      return JSON.stringify({ want: s.objectIds[s.ringPolygon[i]], got, fills });
+    }
+  }
+  return null; })"""
+
+
+async def check_outline_closed(ff, check, layer):
+    """The edge from a ring's last vertex back to its first is drawn (outline picked there, fill off)."""
+    card = f"document.querySelector('[data-layer=\"{layer}\"]')"
+    fill = await ff.eval(f"+{card}.querySelector('[aria-label=\"Fill opacity\"]').value")
+    await ff.eval(f"{SET_RANGE}({card}.querySelector('[aria-label=\"Fill opacity\"]'), 0)")
+    await asyncio.sleep(0.6)
+    r = await ff.eval(f"{OUTLINE_PICK}('{layer}')")
+    if r is None:
+        print("SKIP closing edge (no ring with its closing edge on screen)")
+    else:
+        r = json.loads(r)
+        check(r["fills"] == 0 and r["want"] in r["got"], f"outline drawn along the closing edge (last to first vertex): {r}")
+    await ff.eval(f"{SET_RANGE}({card}.querySelector('[aria-label=\"Fill opacity\"]'), {fill})")
+    await asyncio.sleep(0.3)
+
+
+LAYER_POINT = """((L) => {
+  const src = window.__cs.ann.sources.current.get(L).polygons, v = window.__cs.viewer, d = v.deck, vp = d.getViewports()[0];
+  const r = d.getCanvas().getBoundingClientRect();
+  for (const s of src.shapes) {
+    const P = s.positions, I = s.indices;
+    for (let k = 0; k < I.length; k += 3) {
+      const c = [0, 1, 2].map(j => vp.project([P[2 * I[k + j]], P[2 * I[k + j] + 1]]));
+      const x = (c[0][0] + c[1][0] + c[2][0]) / 3, y = (c[0][1] + c[1][1] + c[2][1]) / 3;
+      const A = Math.abs((c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]));
+      if (A < 40 || x < 20 || y < 20 || x > vp.width - 20 || y > vp.height - 20) continue;
+      const p = v.pickAt(x, y);
+      if (p && p.layerId === L) return JSON.stringify({ x, y, px: Math.round(r.left + x), py: Math.round(r.top + y), id: p.objectId });
+    }
+  }
+  return null; })"""
+
+# deck layers of one annotation layer: poly-, centres-, points-, lines-, overlay- followed by its id
+DECK_ORDER = """((L) => JSON.stringify(window.__cs.viewer.deck.props.layers.map(l => {
+  const m = l.id.match(/^(poly|centres|points|lines|overlay)-(.*?)(-\\d+(-outline)?)?$/);
+  return m ? [m[2] === L, l.props.opacity, l.props.pickable] : null; }).filter(Boolean)))"""
+
+
+async def check_working_layer(ff, check, shots, layer):
+    """Locking a working layer: drawn on top, the only layer picked, the others dimmed; G and the chip."""
+    await click_buttons(ff, "All")  # every layer's groups shown again
+    other = await ff.eval(f"[...document.querySelectorAll('[data-layer]')].map(c => c.dataset.layer)"
+                          f".filter(l => l !== '{layer}' && window.__cs.ann.sources.current.get(l)?.polygons?.shapes?.length)[0] ?? null")
+    pb = await ff.eval(f"{LAYER_POINT}('{layer}')")
+    if not other or not pb:
+        print(f"SKIP working layer (needs a second polygon layer in view: {other}, and a pickable object of {layer})")
+        return
+    pb = json.loads(pb)
+    names = {lid: await ff.eval(f"window.__cs.ann.layers.find(l => l.info.id === '{lid}').info.name") for lid in (layer, other)}
+    await ff.eval(f"document.querySelector('[data-layer=\"{other}\"] button[aria-label=\"Work in this layer\"]').click(), 1")
+    await asyncio.sleep(0.6)
+    chip = await ff.eval("document.querySelector('[data-working-chip]')?.innerText ?? ''")
+    check(names[other] in chip, f"locking a layer shows 'Working in': {' '.join(chip.split())!r}")
+    got = await ff.eval(f"window.__cs.viewer.pickAt({pb['x']}, {pb['y']})?.layerId ?? null")
+    check(got != layer, f"objects of other layers cannot be picked while a layer is locked (picked {got})")
+    order = json.loads(await ff.eval(f"{DECK_ORDER}('{other}')"))
+    mine = [i for i, (m, *_) in enumerate(order) if m]
+    rest = [i for i, (m, *_) in enumerate(order) if not m]
+    check(mine and rest and min(mine) > max(rest), f"the working layer is drawn above the other layers ({len(mine)} deck layers on top)")
+    opacity = await ff.eval(f"window.__cs.ann.layers.find(l => l.info.id === '{layer}').style.opacity")
+    dimmed = [o for m, o, pk in json.loads(await ff.eval(f"{DECK_ORDER}('{layer}')")) if m]
+    check(dimmed and all(abs(o - opacity * 0.35) < 1e-6 for o in dimmed) and all(not pk for m, o, pk in order if not m),
+          f"other layers dimmed to 35 % and not pickable: {dimmed}")
+    if shots:
+        await ff.screenshot(shots / "7b-working-layer.png")
+    await ff.key("g")  # releases
+    await asyncio.sleep(0.4)
+    check(not await ff.eval("!!document.querySelector('[data-working-chip]')"), "G releases the working layer")
+    await ff.mouse([{"type": "pointerMove", "x": pb["px"], "y": pb["py"]}, {"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}])
+    await asyncio.sleep(0.5)
+    await ff.key("g")  # locks the selected object's layer
+    await asyncio.sleep(0.6)
+    chip = await ff.eval("document.querySelector('[data-working-chip]')?.innerText ?? ''")
+    lock = await ff.eval(f"document.querySelector('[data-layer=\"{layer}\"]')?.dataset.working ?? null")
+    check(names[layer] in chip and lock == "true", f"G locks the selected object's layer ({names[layer]})")
+    await ff.eval("document.querySelector('[aria-label=\"Release working layer\"]').click(), 1")
+    await asyncio.sleep(0.4)
+    check(not await ff.eval("!!document.querySelector('[data-working-chip]')"), "the chip's button releases the working layer")
+    await ff.key(ESC)
+    if await ff.eval("!!document.querySelector('aside[aria-label=Inspector]')"):
+        await ff.key("]")
+    await click_buttons(ff, "None", but=layer)
+    await asyncio.sleep(0.3)
+
+
+ENTER, ESC, CTRL, SHIFT, ALT, DEL = "\ue007", "\ue00c", "\ue009", "\ue008", "\ue00a", "\ue017"
+SET_VALUE = ("((el, v) => { const p = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;"
+             " Object.getOwnPropertyDescriptor(p, 'value').set.call(el, v);"
+             " el.dispatchEvent(new Event(el.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); return 1; })")
+TO_SCREEN = ("((x, y) => { const d = window.__cs.viewer.deck, [sx, sy] = d.getViewports()[0].project([x, y]);"
+             " const r = d.getCanvas().getBoundingClientRect(); return [Math.round(r.left + sx), Math.round(r.top + sy)]; })")
+TOAST = "document.querySelector('[role=status]')?.textContent ?? ''"
+INSPECTOR = "document.querySelector('aside[aria-label=Inspector]')?.innerText ?? ''"
+CHECKOUT = "JSON.stringify(window.__cs.edit.checkout?.committed.map(f => f.geometry.coordinates[0]) ?? null)"
+
+
+async def click_at(ff, x, y):
+    await ff.mouse([{"type": "pointerMove", "x": x, "y": y}, {"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}])
+
+
+async def drag(ff, a, b, steps=10):
+    await ff.mouse([{"type": "pointerMove", "x": a[0], "y": a[1]}, {"type": "pointerDown", "button": 0},
+                    *[{"type": "pointerMove", "x": round(a[0] + (b[0] - a[0]) * i / steps),
+                       "y": round(a[1] + (b[1] - a[1]) * i / steps), "duration": 16} for i in range(1, steps + 1)],
+                    {"type": "pointerUp", "button": 0}])
+
+
+async def check_editing(ff, check, shots, base, token, image):
+    """Editing (milestone 7) on the store of the largest polygon layer; see the module docstring."""
+    await ff.goto(f"{base}/?debug&image={image}#token={token}")
+    await ff.wait_for("!!document.querySelector('[role=toolbar][aria-label=\"Edit tools\"]') && !document.querySelector('[aria-label=\"Loading\"]')"
+                      f" && !!{POLYS}", 120)
+    await asyncio.sleep(1)
+    store = await ff.eval(f"window.__cs.ann.layers.find(l => l.info.id === {POLYS}.dataset.layer).info.store_id")
+    overlay = ("window.__cs.edit.overlayEntries.filter(e => e.source.layerId === window.__cs.edit.target?.layerId)"
+               ".reduce((a, e) => a + e.source.count, 0)")
+
+    async def settle_edit():
+        await asyncio.sleep(0.3)
+        await ff.wait_for("!document.querySelector('[role=dialog]') || !!document.querySelector('[role=dialog][aria-label=\"Edit a read-only layer\"]')", 30)
+        await asyncio.sleep(0.9)
+
+    async def screen(x, y):
+        return await ff.eval(f"{TO_SCREEN}({x}, {y})")
+
+    # a new layer through the "Into" picker
+    r = await ff.eval("(() => { const b = document.querySelector('[aria-label=\"Layer for new objects\"]').getBoundingClientRect();"
+                      " return [Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)]; })()")
+    await click_at(ff, *r)
+    await asyncio.sleep(0.3)
+    await ff.eval("[...document.querySelectorAll('[role=option]')].find(o => o.textContent.includes('New layer')).click(), 1")
+    await asyncio.sleep(0.3)
+    if await ff.eval("!!document.querySelector('[role=dialog] [aria-label=Store]')"):
+        await ff.eval(f"{SET_VALUE}(document.querySelector('[role=dialog] [aria-label=Store]'), '{store}')")
+    name = f"smoke {int(time.time())}"
+    await ff.eval(f"{SET_VALUE}(document.querySelector('[aria-label=\"Layer name\"]'), '{name}')")
+    await ff.eval(f"{SET_VALUE}(document.querySelector('[aria-label=\"Group names\"]'), 'alpha, beta')")
+    await ff.eval("[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent === 'Create').click(), 1")
+    await settle_edit()
+    tgt = await ff.eval("window.__cs.ann.layers.find(l => l.info.id === window.__cs.edit.target?.layerId)?.info.name")
+    check(tgt == name, f"new layer created and chosen for drawing: {tgt}")
+
+    # polygon by clicks (inspector open first: it narrows the canvas)
+    if not await ff.eval("!!document.querySelector('aside[aria-label=Inspector]')"):
+        await ff.key("]")
+    await ff.key("1")
+    await asyncio.sleep(1)
+    cx, cy = await ff.eval("(() => { const r = window.__cs.viewer.deck.getCanvas().getBoundingClientRect();"
+                           " return [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)]; })()")
+    await ff.key("p")
+    for dx, dy in [(-120, -100), (-20, -100), (0, -20), (-100, 0)]:
+        await click_at(ff, cx + dx, cy + dy)
+        await asyncio.sleep(0.15)
+    await ff.key(ENTER)
+    await settle_edit()
+    n1 = await ff.eval(overlay)
+    insp = await ff.eval(INSPECTOR)
+    check(n1 == 1 and "polygon" in insp and name in insp, f"polygon drawn, saved and selected ({n1} new)")
+    if shots:
+        await ff.screenshot(shots / "8-drawn.png")
+    await ff.chord(CTRL, "z")
+    await settle_edit()
+    n_undo = await ff.eval(overlay)
+    await ff.chord(CTRL, SHIFT, "z")
+    await settle_edit()
+    check(n_undo == 0 and await ff.eval(overlay) == 1, "Ctrl+Z undoes, Ctrl+Shift+Z redoes")
+
+    # vertex editing and moving
+    await ff.key("v")
+    await click_at(ff, cx - 60, cy - 50)
+    await asyncio.sleep(0.5)
+    await ff.key("e")
+    await ff.wait_for("!!window.__cs.edit.checkout", 10)
+    ring = json.loads(await ff.eval(CHECKOUT))[0]
+    v0 = await screen(*ring[0])
+    await drag(ff, v0, (v0[0] - 40, v0[1] - 40))
+    await settle_edit()
+    ring2 = json.loads(await ff.eval(CHECKOUT))[0]
+    check(ring2[0] != ring[0] and ring2[1] == ring[1], f"dragging a vertex moves it: {ring[0]} -> {ring2[0]}")
+    c = await screen(sum(p[0] for p in ring2[:4]) / 4, sum(p[1] for p in ring2[:4]) / 4)
+    await drag(ff, c, (c[0] + 50, c[1]))
+    await settle_edit()
+    ring3 = json.loads(await ff.eval(CHECKOUT))[0]
+    check(all(abs(b[0] - a[0] - 50) < 2 for a, b in zip(ring2, ring3)), "dragging inside moves the whole polygon")
+    m = await screen((ring3[1][0] + ring3[2][0]) / 2, (ring3[1][1] + ring3[2][1]) / 2)
+    await ff.mouse([{"type": "pointerMove", "x": m[0], "y": m[1] - 1}, {"type": "pointerMove", "x": m[0], "y": m[1], "duration": 50},
+                    {"type": "pause", "duration": 100}, {"type": "pointerDown", "button": 0}, {"type": "pointerUp", "button": 0}])
+    await settle_edit()
+    n_v = len(json.loads(await ff.eval(CHECKOUT))[0]) - 1
+    v1 = await screen(*json.loads(await ff.eval(CHECKOUT))[0][1])
+    await click_at(ff, *v1)
+    await settle_edit()
+    n_plain = len(json.loads(await ff.eval(CHECKOUT))[0]) - 1
+    await ff.send("input.performActions", {"context": ff.context, "actions": [
+        {"type": "key", "id": "kbd", "actions": [{"type": "keyDown", "value": ALT}, {"type": "pause"}, {"type": "pause"},
+                                                 {"type": "pause"}, {"type": "keyUp", "value": ALT}]},
+        {"type": "pointer", "id": "mouse", "parameters": {"pointerType": "mouse"}, "actions": [
+            {"type": "pause"}, {"type": "pointerMove", "x": v1[0], "y": v1[1]}, {"type": "pointerDown", "button": 0},
+            {"type": "pointerUp", "button": 0}, {"type": "pause"}]}]})
+    await settle_edit()
+    n_alt = len(json.loads(await ff.eval(CHECKOUT))[0]) - 1
+    check((n_v, n_plain, n_alt) == (5, 5, 4), f"edge click adds a vertex, plain click keeps it, Alt+click removes it ({n_v}, {n_plain}, {n_alt})")
+
+    # group and attributes in the inspector
+    await ff.eval(f"{SET_VALUE}(document.querySelector('aside[aria-label=Inspector] select[aria-label=Group]'), '1')")
+    await settle_edit()
+    check(await ff.eval("window.__cs.edit.checkout?.features[0].group") == 1, "inspector changes the group")
+    await ff.eval(f"{SET_VALUE}(document.querySelector('[aria-label=\"Add attribute name\"]'), 'smoke_score')")
+    await ff.eval(f"{SET_VALUE}(document.querySelector('[aria-label=\"Add attribute value\"]'), '0.75')")
+    await ff.eval("document.querySelector('button[aria-label=\"Add attribute\"]').click(), 1")
+    await asyncio.sleep(0.5)
+    val = await ff.wait_for("document.querySelector('aside[aria-label=Inspector] input[aria-label=smoke_score]')?.value ?? null", 10)
+    check(val == "0.75", f"inspector adds an attribute: smoke_score = {val}")
+    await ff.key(DEL)
+    await settle_edit()
+    gone = await ff.eval(overlay)
+    await ff.chord(CTRL, "z")
+    await settle_edit()
+    check(gone == 0 and await ff.eval(overlay) == 1, "Delete removes the selection; undo restores it")
+    await ff.key(ESC)
+
+    # the other tools
+    import math
+    tools = [("r", "polygon"), ("c", "polygon"), ("d", "polygon"), ("x", "point"), ("n", "polyline")]
+    for i, (key, kind) in enumerate(tools):
+        before = await ff.eval(overlay)
+        await ff.key(key)
+        await asyncio.sleep(0.2)
+        x0, y0 = cx - 250 + 120 * i, cy + 80
+        if key in "rc":
+            await drag(ff, (x0, y0), (x0 + 80, y0 + 60))
+        elif key == "d":
+            pts = [(round(x0 + 40 + 40 * math.cos(t * math.pi / 10)), round(y0 + 30 + 30 * math.sin(t * math.pi / 10))) for t in range(21)]
+            await ff.mouse([{"type": "pointerMove", "x": pts[0][0], "y": pts[0][1]}, {"type": "pointerDown", "button": 0},
+                            *[{"type": "pointerMove", "x": x, "y": y, "duration": 20} for x, y in pts[1:]],
+                            {"type": "pointerUp", "button": 0}])
+        elif key == "x":
+            await click_at(ff, x0 + 40, y0 + 30)
+        else:
+            for x, y in [(x0, y0), (x0 + 50, y0 + 40), (x0 + 90, y0)]:
+                await click_at(ff, x, y)
+                await asyncio.sleep(0.15)
+            await ff.key(ENTER)
+        await settle_edit()
+        insp = await ff.eval(INSPECTOR)
+        check(await ff.eval(overlay) == before + 1 and f"Type{kind}" in insp.replace("\n", "").replace("\t", ""),
+              f"tool {key.upper()} draws a {kind}")
+    if shots:
+        await ff.screenshot(shots / "9-tools.png")
+    await ff.key(ESC)
+
+    # a commit by another client reaches the view through the event stream
+    before = await ff.eval(overlay)
+    status = await ff.eval(f"""(async () => {{
+      const h = {{Authorization: 'Bearer {token}', 'Content-Type': 'application/json'}};
+      const rev = (await (await fetch('api/v1/stores/{store}/revision', {{headers: h}})).json()).revision;
+      const l = window.__cs.edit.targetInfo;
+      const r = await fetch('api/v1/stores/{store}/commit', {{method: 'POST', headers: h, body: JSON.stringify({{
+        base_revision: rev, client: 'smoke-other', ops: [{{op: 'create', group_id: l.groups[1].id,
+        geometry: {{type: 'Point', coordinates: [window.__cs.viewer.view().x, window.__cs.viewer.view().y]}}}}]}})}});
+      return r.status; }})()""")
+    await asyncio.sleep(1.5)
+    check(status == 200 and await ff.eval(overlay) == before + 1, "another client's commit appears without a reload")
+
+    # first edit of a read-only layer: an editable copy takes its place, then Save / Discard edits
+    async def inside_of(layer):
+        """A level-0 point inside a polygon of `layer` (centroid of its largest triangle)."""
+        await ff.wait_for(f"window.__cs.ann.sources.current.get('{layer}')?.polygons?.stats.pending === 0", 30)
+        await asyncio.sleep(0.5)
+        return await ff.eval(f"""(() => {{ const s = window.__cs.ann.sources.current.get('{layer}').polygons.shapes[0];
+          if (!s) return null; const P = s.positions, I = s.indices; let best = 0, at = 0;
+          for (let k = 0; k < I.length; k += 3) {{ const [a, b, c] = [I[k], I[k + 1], I[k + 2]];
+            const A = Math.abs((P[2*b] - P[2*a]) * (P[2*c+1] - P[2*a+1]) - (P[2*c] - P[2*a]) * (P[2*b+1] - P[2*a+1]));
+            if (A > best) {{ best = A; at = k; }} }}
+          return [0, 1, 2].map(j => I[at + j]).reduce((o, i) => [o[0] + P[2 * i] / 3, o[1] + P[2 * i + 1] / 3], [0, 0]); }})()""")
+
+    def drawn_polys(layer):
+        """Polygons drawn for a layer: bulk ones (edited ones hidden) plus the edit overlay's."""
+        return (f"window.__cs.ann.sources.current.get('{layer}').polygons.stats.polygons + "
+                f"window.__cs.edit.overlayEntries.filter(e => e.source.layerId === '{layer}').reduce((a, e) => a + e.source.count, 0)")
+
+    def card(layer, what):
+        return f"document.querySelector('[data-layer=\"{layer}\"]')?.{what}"
+
+    small = (f"window.__cs.ann.layers.filter(l => l.info.store_id === '{store}' && l.info.counts.polygon > 0 && l.info.counts.polygon < 10000"
+             " && (COND)).sort((a, b) => a.info.counts.polygon - b.info.counts.polygon)[0]?.info.id ?? null")
+    ro = await ff.eval(small.replace("COND", "!l.info.editable"))
+    await ff.key("0")
+    await asyncio.sleep(2)
+    fork = None
+    if ro:
+        await ff.eval(f"[...document.querySelectorAll('[data-layer]')].filter(c => c.dataset.layer !== '{ro}')"
+                      ".forEach(c => c.querySelector('button[aria-label=\"Hide layer\"]')?.click()), 1")
+        inside = await inside_of(ro)
+        ro_name = await ff.eval(f"window.__cs.ann.layers.find(l => l.info.id === '{ro}').info.name")
+        n_ro = await ff.eval(f"window.__cs.ann.sources.current.get('{ro}').polygons.stats.polygons")
+        await click_at(ff, *(await screen(*inside)))
+        await asyncio.sleep(0.5)
+        tgt = json.loads(await ff.eval("JSON.stringify(window.__cs.edit.target)"))
+        grp = await ff.eval("+document.querySelector('aside[aria-label=Inspector] select[aria-label=Group]')?.value")
+        check(tgt["layerId"] == ro and tgt["group"] == grp, f"'Into' follows the selection: {tgt}")
+        await ff.key(DEL)
+        dlg = await ff.wait_for("document.querySelector('[role=dialog][aria-label=\"Edit a read-only layer\"]')?.innerText ?? null", 10)
+        check("editable copy" in dlg, "deleting from a read-only layer asks to make an editable copy")
+        await ff.eval("[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent === 'Make an editable copy').click(), 1")
+        await ff.wait_for(f"!window.__cs.ann.layers.some(l => l.info.id === '{ro}')", 60)
+        fork = await ff.eval(f"window.__cs.ann.layers.find(l => l.info.name === '{ro_name}' && l.info.editable)?.info.id ?? null")
+        await ff.wait_for(f"(+{card(fork, 'dataset.unsaved')} || 0) > 0", 15)
+        await ff.wait_for(f"window.__cs.ann.sources.current.get('{fork}')?.polygons?.stats.pending === 0 && "
+                          f"window.__cs.ann.sources.current.get('{fork}').polygons.stats.rebuilds > 0", 30)
+        await asyncio.sleep(1)
+        title = await ff.eval(card(fork, "querySelector('span.font-medium').textContent"))
+        n_fork = await ff.eval(drawn_polys(fork))
+        check(title == f"{ro_name} (editable)" and n_fork == n_ro - 1,
+              f"the copy, '{title}', replaces the original in the list and the edit applies to it ({n_ro} -> {n_fork} polygons)")
+        if shots:
+            await ff.screenshot(shots / "10-editable.png")
+    else:
+        fork = await ff.eval(small.replace("COND", "!!l.info.forked_from"))
+        print(f"SKIP fork (every small polygon layer was copied by an earlier run; using {fork})")
+    if fork:
+        name = await ff.eval(f"window.__cs.ann.layers.find(l => l.info.id === '{fork}').info.name")
+        if await ff.eval(f"(+{card(fork, 'dataset.unsaved')} || 0) > 0"):
+            await ff.eval(card(fork, "querySelector('button[title^=\"Make the edited\"]').click()") + ", 1")
+            await ff.wait_for(f"{card(fork, 'dataset.unsaved')} === '0'", 15)
+        check(await ff.eval(card(fork, "querySelector('span.font-medium').textContent")) == name and
+              not await ff.eval(card(fork, "className.includes('bg-editing')")), f"'Save edits' leaves one layer, '{name}'")
+        await ff.eval(f"[...document.querySelectorAll('[data-layer]')].filter(c => c.dataset.layer !== '{fork}')"
+                      ".forEach(c => c.querySelector('button[aria-label=\"Hide layer\"]')?.click()), 1")
+        await ff.eval(card(fork, "querySelector('button[aria-label=\"Show layer\"]')?.click()") + ", 1")
+        inside = await inside_of(fork)
+        n0 = await ff.eval(drawn_polys(fork))
+        await click_at(ff, *(await screen(*inside)))
+        await asyncio.sleep(0.5)
+        await ff.key(DEL)
+        await ff.wait_for(f"(+{card(fork, 'dataset.unsaved')} || 0) > 0", 15)
+        await asyncio.sleep(0.5)
+        n1 = await ff.eval(drawn_polys(fork))
+        await ff.eval(card(fork, "querySelector('button[title^=\"Revert the layer\"]').click()") + ", 1")
+        await asyncio.sleep(0.3)
+        await ff.eval("[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent === 'Discard').click(), 1")
+        await ff.wait_for(f"{card(fork, 'dataset.unsaved')} === '0'", 15)
+        await asyncio.sleep(1)
+        n2 = await ff.eval(drawn_polys(fork))
+        check(n1 == n0 - 1 and n2 == n0, f"'Discard edits' reverts to the save point ({n0} -> {n1} -> {n2} polygons)")
+
+    t = json.loads(await ff.eval("JSON.stringify(window.__cs.edit.timing.current)"))
+    # reload: the undo stack comes back from the server log
+    await ff.goto(f"{base}/?debug#token={token}")
+    await ff.wait_for("!!document.querySelector('[role=toolbar][aria-label=\"Edit tools\"]') && !document.querySelector('[aria-label=\"Loading\"]')", 60)
+    await ff.wait_for("window.__cs.edit.canUndo", 15)
+    await ff.chord(CTRL, "z")
+    await asyncio.sleep(1.5)
+    check(await ff.eval(TOAST) == "Undone", "undo works after a reload")
+
+    # "Discard changes": reverts this session's edits only, in one step that Redo brings back
+    discard = "[...document.querySelectorAll('[role=toolbar] button')].find(b => b.textContent === 'Discard changes')"
+    check(await ff.eval(f"{discard}.disabled"), "nothing to discard right after opening")
+    before = await ff.eval(overlay)
+    cx, cy = await ff.eval("(() => { const r = window.__cs.viewer.deck.getCanvas().getBoundingClientRect();"
+                           " return [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)]; })()")
+    await ff.key("x")
+    for dx in (0, 40):
+        await click_at(ff, cx + dx, cy)
+        await settle_edit()
+    await ff.key(ESC)
+    drawn = await ff.eval(overlay)
+    await ff.eval(f"{discard}.click(), 1")
+    await asyncio.sleep(0.3)
+    await ff.eval("[...document.querySelectorAll('[role=dialog] button')].find(b => b.textContent === 'Discard').click(), 1")
+    await settle_edit()
+    after = await ff.eval(overlay)
+    toast = await ff.eval(TOAST)
+    await ff.chord(CTRL, SHIFT, "z")
+    await settle_edit()
+    check(drawn == before + 2 and after == before and await ff.eval(overlay) == drawn and toast == "Discarded 2 changes",
+          f"Discard changes reverts this session's edits; Redo restores them ({before} -> {drawn} -> {after} -> {await ff.eval(overlay)})")
+    return t
 
 
 async def check_labels(ff, check, shots):
@@ -269,6 +679,8 @@ async def main() -> int:
     ap.add_argument("base")
     ap.add_argument("token")
     ap.add_argument("--shots", type=pathlib.Path)
+    ap.add_argument("--edit", action="store_true",
+                    help="also test editing (writes to the curation databases: run the server with a scratch --sidecar-dir)")
     a = ap.parse_args()
     ok = True
 
@@ -359,6 +771,19 @@ async def main() -> int:
             check(v6["image"] != v5["image"], f"PageDown switches image ({v5['image']} -> {v6['image']})")
         else:
             print("SKIP image switching (one image served)")
+
+        if a.edit:
+            if polys >= 100 and await ff.eval("(async () => (await (await fetch('api/v1/stores', {headers: {Authorization: 'Bearer "
+                                              + a.token + "'}})).json()).some(s => s.editable))()"):
+                t = await check_editing(ff, check, a.shots, a.base, a.token, v0["image"])
+                for k, v in t.items():
+                    v = sorted(v)
+                    if v:
+                        print(f"     {k}: n={len(v)} p50 {v[len(v) // 2]:.0f} ms, max {v[-1]:.0f} ms")
+            else:
+                check(False, "editing needs a polygon layer of 100 or more on an editable store")
+        else:
+            print("SKIP editing (needs --edit and a scratch --sidecar-dir)")
 
         errors = [e["params"] for e in ff.events
                   if e.get("method") == "log.entryAdded" and e["params"].get("level") == "error"]

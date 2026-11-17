@@ -31,3 +31,17 @@ export async function postResults(name: string, data: unknown): Promise<string> 
   if (!r.ok) throw new Error(`results: ${r.status}`);
   return ((await r.json()) as { saved: string }).saved;
 }
+
+/** POST JSON; resolves with the status and parsed body (also for 4xx), rejects on network errors. */
+export async function postJSON<T = unknown>(path: string, body: unknown): Promise<{ ok: boolean; status: number; data: T }> {
+  const r = await fetch(`api/v1/${path}`, {
+    method: "POST", headers: { ...authHeaders, "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  let data: T;
+  try {
+    data = (await r.json()) as T;
+  } catch {
+    data = {} as T;
+  }
+  return { ok: r.ok, status: r.status, data };
+}

@@ -8,12 +8,15 @@ import { getJSON, type ImageInfo } from "@/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_STYLE, type LabelClass, type LabelStyle } from "@/viewer/labels";
-import type { ObjectPick } from "@/viewer/annstyle";
+import { DEFAULT_ANN_STYLE, type ObjectPick } from "@/viewer/annstyle";
+import { DRAW_TOOLS, editorLayer, type Tool } from "@/viewer/edits";
 import type { View, Viewer } from "@/viewer/viewer";
 import { useAnnotations, useObjects } from "./annotations";
+import { Busy, DiscardDialog, EditBar, ForkDialog, NewLayerDialog, Toast, TOOLS, WorkChip } from "./EditBar";
+import { useEditing } from "./editing";
 import { Inspector, objectKey } from "./Inspector";
 import { LabelPanel, type LabelMapState } from "./LabelPanel";
-import { LayersPanel } from "./LayersPanel";
+import { LayersPanel, layerName, type Work } from "./LayersPanel";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { Toolbar } from "./Toolbar";
@@ -101,26 +104,81 @@ export function App() {
   // ?debug exposes the viewer for end-to-end measurements
   useEffect(() => {
     if (viewer && new URLSearchParams(location.search).has("debug"))
-      (window as unknown as { __cs?: unknown }).__cs = { viewer, ann };
+      (window as unknown as { __cs?: unknown }).__cs = { viewer, ann, edit };
   });
-  const objects = useObjects(selection);
+  const { objects, invalidate } = useObjects(selection);
   const layerById = useMemo(() => new Map(ann.layers.map((l) => [l.info.id, l.info])), [ann.layers]);
+  const edit = useEditing({ imageId: image?.id ?? null, ann, selection, setSelection, invalidate, zoom: view?.zoom ?? 0 });
+  const canEdit = ann.stores.some((s) => s.editable);
+  // the working layer: on top, the only one pickable, the others dimmed
+  const [work, setWork] = useState<Work | null>(null);
+  const lockWork = useCallback((w: Work | null) => {
+    setWork(w);
+    if (!w) return;
+    const l = ann.layers.find((x) => x.info.id === w);
+    if (l && !l.style.visible) ann.setStyle(l.info.id, { ...l.style, visible: true });
+    if (canEdit && l?.info.groups.length && edit.target?.layerId !== w) edit.setTarget({ layerId: w, group: l.info.groups[0].index });
+    setSelection((sel) => sel.filter((p) => p.layerId === w));
+  }, [ann, canEdit, edit]);
+  // it follows its layer to a fork, and is released when the layer goes
   useEffect(() => {
-    viewer?.setAnnotations(ann.drawn);
-  }, [viewer, ann.drawn]);
+    if (!work || layerById.has(work) || !ann.layers.length) return;
+    const fork = ann.layers.find((l) => l.info.forked_from === work);
+    setWork(fork ? fork.info.id : null);
+  }, [work, layerById, ann.layers]);
   useEffect(() => {
-    viewer?.setSelection(selection);
-  }, [viewer, selection]);
+    viewer?.setFocus(work);
+  }, [viewer, work]);
+  const workInfo = work ? layerById.get(work) : undefined;
+  const workChip = workInfo ? <WorkChip layer={layerName(workInfo)} onRelease={() => setWork(null)} /> : null;
+  const [newLayer, setNewLayer] = useState(false);
+  /** "Discard changes" (true) or "Discard edits" of a layer (its id) waiting for confirmation */
+  const [discardAsk, setDiscardAsk] = useState<boolean | string>(false);
+  const [names, setNames] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    Promise.all(ann.stores.map((s) => getJSON<{ attributes: string[] }>(`stores/${encodeURIComponent(s.id)}/attributes`)))
+      .then((r) => live && setNames([...new Set(r.flatMap((x) => x.attributes))].sort()), () => {});
+    return () => {
+      live = false;
+    };
+  }, [ann.stores]);
+  const drawn = useMemo(() => [...ann.drawn, ...edit.overlayEntries], [ann.drawn, edit.overlayEntries]);
+  useEffect(() => {
+    viewer?.setAnnotations(drawn);
+  }, [viewer, drawn]);
+  // objects being edited are drawn by the editor, not outlined as selected
+  useEffect(() => {
+    const busy = new Set(edit.checkout?.features.map((f) => `${edit.checkout!.layerId}|${f.id}`));
+    viewer?.setSelection(busy.size ? selection.filter((p) => !busy.has(objectKey(p))) : selection);
+  }, [viewer, selection, edit.checkout]);
+  // the editor layer: drawing (pending objects shown until saved) or the checked-out selection
+  const { tool, checkout, pending, onEdit, drawTick, targetInfo } = edit;
+  useEffect(() => {
+    if (!viewer) return;
+    if (tool === "select" || (tool === "modify" && !checkout)) {
+      viewer.setEditor(null);
+      return;
+    }
+    const info = tool === "modify" ? layerById.get(checkout!.layerId) ?? null : targetInfo;
+    const style = info ? ann.layers.find((l) => l.info.id === info.id)?.style ?? DEFAULT_ANN_STYLE : null;
+    viewer.setEditor(editorLayer({ tool, features: tool === "modify" ? checkout!.features : pending, style, info, onEdit,
+                                   zoom: view?.zoom ?? 0, mpp: image?.mpp ?? null }), DRAW_TOOLS.has(tool));
+  }, [viewer, tool, checkout, pending, onEdit, drawTick, targetInfo, layerById, ann.layers]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setSelection([]);
     setHoverPick(null);
+    setWork(null);
   }, [imageId]);
 
   const onHover = useCallback((p: [number, number] | null, pickInfo: ObjectPick | null) => {
     setCursor(p);
     setHoverPick(pickInfo);
   }, []);
+  const toolRef = useRef<Tool>("select");
+  toolRef.current = edit.tool;
   const onClick = useCallback((pk: ObjectPick | null, add: boolean) => {
+    if (DRAW_TOOLS.has(toolRef.current)) return; // clicks draw
     if (!pk) {
       if (!add) setSelection([]);
       return;
@@ -173,8 +231,30 @@ export function App() {
     if (!viewer) return;
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
-      if (e.ctrlKey || e.metaKey || e.altKey || t?.closest("input, textarea, select, [role=listbox], [contenteditable]"))
+      if (t?.closest("input, textarea, select, [role=listbox], [contenteditable], [role=dialog]")) return;
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && canEdit) {
+        const k = e.key.toLowerCase();
+        if (k === "z" || k === "y") {
+          e.preventDefault();
+          if (k === "y" || e.shiftKey) void edit.redo();
+          else void edit.undo();
+        }
         return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (canEdit && !e.shiftKey) {
+        const tl = TOOLS.find((x) => x.key === e.key);
+        if (tl) {
+          e.preventDefault();
+          edit.setTool(tl.tool);
+          return;
+        }
+        if (e.key === "Delete" || e.key === "Backspace") {
+          e.preventDefault();
+          if (!(e.key === "Backspace" && edit.removeLastVertex()) && !DRAW_TOOLS.has(edit.tool)) void edit.deleteSelected();
+          return;
+        }
+      }
       const step = e.shiftKey ? 0.5 : 0.2;
       const actions: Record<string, () => void> = {
         ArrowLeft: () => viewer.panBy(-step, 0), ArrowRight: () => viewer.panBy(step, 0),
@@ -182,8 +262,13 @@ export function App() {
         "+": () => viewer.zoomBy(1), "=": () => viewer.zoomBy(1), "-": () => viewer.zoomBy(-1),
         "0": () => viewer.fit(), f: () => viewer.fit(), "1": () => viewer.zoomTo(0),
         PageDown: () => cycle(1), PageUp: () => cycle(-1),
-        Escape: () => setSelection([]),
+        Escape: () => (edit.tool !== "select" ? edit.setTool("select") : setSelection([])),
         "[": () => setLeft((v) => !v), "]": () => setRight((v) => !v),
+        g: () => {
+          const last = selection[selection.length - 1];
+          if (work) lockWork(null);
+          else if (last) lockWork(last.layerId);
+        },
         l: () => setStyles((old) => {
           const anyVisible = labelInfos.some((i) => (old[i.id] ?? DEFAULT_STYLE).visible);
           return Object.fromEntries(labelInfos.map((i) => [i.id, { ...(old[i.id] ?? DEFAULT_STYLE), visible: !anyVisible }]));
@@ -206,7 +291,7 @@ export function App() {
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, [viewer, images, imageId, pick, labelInfos]);
+  }, [viewer, images, imageId, pick, labelInfos, canEdit, edit, selection, work, lockWork]);
 
   return (
     <TooltipProvider>
@@ -226,7 +311,8 @@ export function App() {
                 <TabsContent value="layers">
                   {ann.error && <p className="p-2 text-red-400">{ann.error}</p>}
                   <LayersPanel stores={ann.stores} layers={ann.layers} mpp={image?.mpp} zoom={view?.zoom ?? 0}
-                               onChange={ann.setStyle} />
+                               onChange={ann.setStyle} work={work} onWork={lockWork}
+                               edit={canEdit ? { onSave: (id) => void edit.saveLayer(id), onDiscard: (id) => setDiscardAsk(id) } : undefined} />
                 </TabsContent>
                 <TabsContent value="labels"><LabelPanel maps={maps} onChange={setStyle} /></TabsContent>
               </Tabs>
@@ -234,6 +320,18 @@ export function App() {
           )}
           <main className="relative min-w-0 flex-1">
             <ViewerPane onReady={setViewer} onView={setView} onHover={onHover} onClick={onClick} />
+            {canEdit && image && (
+              <EditBar tool={edit.tool} onTool={edit.setTool} canUndo={edit.canUndo} canRedo={edit.canRedo}
+                       onUndo={() => void edit.undo()} onRedo={() => void edit.redo()}
+                       canDelete={selection.length > 0} onDelete={() => void edit.deleteSelected()}
+                       sessionEdits={edit.sessionEdits} onDiscard={() => setDiscardAsk(true)}
+                       layers={ann.layers} target={edit.target} onTarget={edit.setTarget}
+                       canCreate={canEdit} onNewLayer={() => setNewLayer(true)} work={workChip} />
+            )}
+            {!canEdit && workChip && (
+              <div className="absolute top-2 left-1/2 z-10 -translate-x-1/2 rounded-md border border-border bg-background/90 p-0.5 shadow">{workChip}</div>
+            )}
+            {edit.message && <Toast key={edit.message.id} message={edit.message} />}
             {load.state !== "ready" || !image ? (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground">
                 {load.state === "loading" ? "Loading…" : load.state === "error" ? load.message : "No images served."}
@@ -243,11 +341,39 @@ export function App() {
           {right && (
             <Sidebar side="right" label="Inspector">
               <Inspector selection={selection} layers={layerById} objects={objects} mpp={image?.mpp}
+                         edit={canEdit ? { onGroup: (p, g) => void edit.setGroup(p, g), onValues: (p, v) => void edit.setValues(p, v),
+                                           onDelete: () => void edit.deleteSelected(), names } : undefined}
                          onClear={() => setSelection([])} onClose={() => setRight(false)}
                          onRemove={(p) => setSelection((old) => old.filter((o) => objectKey(o) !== objectKey(p)))} />
             </Sidebar>
           )}
         </div>
+        {edit.forkAsk && <ForkDialog ask={edit.forkAsk} />}
+        {edit.busy && <Busy text={edit.busy} />}
+        {discardAsk === true && (
+          <DiscardDialog count={edit.sessionEdits} onCancel={() => setDiscardAsk(false)}
+                         onConfirm={() => {
+                           setDiscardAsk(false);
+                           void edit.discard();
+                         }} />
+        )}
+        {typeof discardAsk === "string" && (
+          <DiscardDialog count={layerById.get(discardAsk)?.unsaved ?? 0} layer={layerById.get(discardAsk)?.name}
+                         onCancel={() => setDiscardAsk(false)}
+                         onConfirm={() => {
+                           const id = discardAsk;
+                           setDiscardAsk(false);
+                           void edit.discardLayer(id);
+                         }} />
+        )}
+        {newLayer && (
+          <NewLayerDialog stores={ann.stores.filter((s) => s.editable)} initial={edit.targetInfo?.store_id}
+                          onCancel={() => setNewLayer(false)}
+                          onCreate={(st, n, g) => {
+                            setNewLayer(false);
+                            void edit.createLayer(st, n, g);
+                          }} />
+        )}
         <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} labels={hoverLabels} point={hoverPoint} />
       </div>
     </TooltipProvider>

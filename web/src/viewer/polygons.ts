@@ -85,6 +85,28 @@ interface GroupShapes {
   /** first ring of each polygon, length count + 1 */
   polygonRings: Uint32Array;
   fillData?: object;
+  /** the rings with their first vertex repeated, for drawing (made on first use) */
+  outline?: GroupPaths;
+}
+
+/** Rings closed by repeating their first vertex. deck closes `_pathType: "loop"`
+ * paths only when it normalizes them, which it skips for binary data, so the
+ * last-to-first edge would be missing. */
+function closedRings(r: GroupPaths): GroupPaths {
+  const positions = new Float32Array(r.positions.length + 2 * r.count);
+  const starts = new Uint32Array(r.count + 1);
+  let v = 0;
+  for (let i = 0; i < r.count; i++) {
+    const a = r.starts[i], b = r.starts[i + 1];
+    starts[i] = v;
+    positions.set(r.positions.subarray(2 * a, 2 * b), 2 * v);
+    v += b - a;
+    positions[2 * v] = r.positions[2 * a];
+    positions[2 * v + 1] = r.positions[2 * a + 1];
+    v++;
+  }
+  starts[r.count] = v;
+  return { group: r.group, positions, starts, objectIds: r.objectIds, count: r.count };
 }
 
 function parse(buf: Uint8Array): Tile {
@@ -142,8 +164,18 @@ export class PolygonSource implements AnnSource {
   private shapes: GroupShapes[] = [];
   private centres: PointBuffers | null = null;
   private drawn = false;
+  /** objects drawn by the edit overlay instead */
+  private hidden: ReadonlySet<number> = new Set();
+  private hiddenVersion = 0;
 
   constructor(readonly info: LayerInfo) {}
+
+  setHidden(ids: ReadonlySet<number>, version: number) {
+    if (version === this.hiddenVersion) return;
+    this.hidden = ids;
+    this.hiddenVersion = version;
+    if (this.drawn) this.schedule();
+  }
 
   get layerId() {
     return this.info.id;
@@ -259,14 +291,18 @@ export class PolygonSource implements AnnSource {
   }
 
   private mergeCentres(tiles: CentreTile[]): PointBuffers {
-    const n = tiles.reduce((a, t) => a + t.n, 0);
+    const hidden = this.hidden;
+    let n = tiles.reduce((a, t) => a + t.n, 0);
+    if (hidden.size) for (const t of tiles) for (let j = 0; j < t.n; j++) if (hidden.has(Number(t.ids[j]))) n--;
     const pos = new Float32Array(2 * n), groups = new Uint32Array(n), ids = new Float64Array(n);
     let i = 0;
     for (const t of tiles)
-      for (let j = 0; j < t.n; j++, i++) {
+      for (let j = 0; j < t.n; j++) {
+        if (hidden.size && hidden.has(Number(t.ids[j]))) continue;
         pos[2 * i] = t.x[j]; pos[2 * i + 1] = t.y[j];
         groups[i] = t.groups[j];
         ids[i] = Number(t.ids[j]);
+        i++;
       }
     return new PointBuffers(this.info, `centres-${this.info.id}`, "polygon", pos, groups, ids);
   }
@@ -282,7 +318,7 @@ export class PolygonSource implements AnnSource {
       const box = boxes(t);
       for (let j = 0; j < t.n; j++) {
         const id = Number(t.ids[j]);
-        if (seen.has(id)) continue;
+        if (seen.has(id) || this.hidden.has(id)) continue;
         seen.add(id);
         const g = t.groups[j];
         if (box.area[j] < cutoff) {
@@ -363,8 +399,9 @@ export class PolygonSource implements AnnSource {
       if (style.outline)
         out.push(new PathLayer({
           id: this.outlineId(s.group),
-          data: pathData(s.rings) as never,
-          _pathType: "loop",
+          data: pathData(s.outline ??= closedRings(s.rings)) as never,
+          _pathType: "open",
+          capRounded: true,
           positionFormat: "XY",
           getColor: [...c, 255],
           opacity: style.opacity,
@@ -381,7 +418,7 @@ export class PolygonSource implements AnnSource {
   }
 
   pick(deckLayerId: string, index: number): ObjectPick | null {
-    if (this.centres && deckLayerId === this.centres.deckId) return this.centres.pick(index);
+    if (this.centres?.owns(deckLayerId)) return this.centres.pick(index);
     for (const s of this.shapes) {
       let p = -1;
       if (deckLayerId === this.fillId(s.group)) p = index;

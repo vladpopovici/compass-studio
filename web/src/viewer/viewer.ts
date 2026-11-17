@@ -34,6 +34,12 @@ export interface ViewerOptions {
 }
 
 const ANIMATE_MS = 180;
+const CONTROLLER = { inertia: 300, scrollZoom: { speed: 0.02, smooth: true }, keyboard: false, doubleClickZoom: true };
+/** opacity factor of annotation layers other than the working layer */
+const DIM = 0.35;
+
+/** deck layer id of the editor (its picks are handles, not annotation objects) */
+const EDITOR_ID = "edit";
 
 export class Viewer {
   readonly stats = new TileStats();
@@ -51,20 +57,25 @@ export class Viewer {
   /** size band at the current zoom; layers are rebuilt when it changes */
   private band: BandId | null = null;
   private renderQueued = false;
+  /** editor layer (milestone 7), drawn on top */
+  private overlay: Layer[] = [];
+  private focus: string | null = null;
 
   constructor(parent: HTMLDivElement, private opts: ViewerOptions = {}) {
     this.deck = new Deck({
       parent,
       views: new OrthographicView({ id: "ortho", flipY: true }),
       viewState: this.vs,
-      controller: { inertia: 300, scrollZoom: { speed: 0.02, smooth: true }, keyboard: false, doubleClickZoom: true },
+      controller: CONTROLLER,
       onViewStateChange: ({ viewState }) => {
         this.setViewState(viewState as OrthographicViewState);
       },
       onHover: (info) => this.opts.onHover?.(info.coordinate ? [info.coordinate[0], info.coordinate[1]] : null,
                                               this.objectPick(info.layer?.id, info.index)),
-      onClick: (info, ev) => this.opts.onClick?.(this.objectPick(info.layer?.id, info.index),
-                                                 !!(ev.srcEvent as MouseEvent | undefined)?.shiftKey),
+      onClick: (info, ev) => {
+        if (info.layer?.id === EDITOR_ID) return; // the editor handles its own clicks
+        this.opts.onClick?.(this.objectPick(info.layer?.id, info.index), !!(ev.srcEvent as MouseEvent | undefined)?.shiftKey);
+      },
       onAfterRender: () => {
         this.frames++;
         this.stats.markDrawn(performance.now());
@@ -140,6 +151,20 @@ export class Viewer {
     this.render();
   }
 
+  /** The editor layer (or none), drawn above everything; `drawing` turns off double-click zoom. */
+  setEditor(layer: Layer | null, drawing = false) {
+    this.overlay = layer ? [layer] : [];
+    this.deck.setProps({ controller: { ...CONTROLLER, doubleClickZoom: !drawing } });
+    this.render();
+  }
+
+  /** The working annotation layer: drawn above every other annotation, the
+   * only one pickable; the others dimmed to `DIM`. `null`: none. */
+  setFocus(focus: string | null) {
+    this.focus = focus;
+    this.render();
+  }
+
   /** Selected objects, outlined. */
   setSelection(picks: ObjectPick[]) {
     this.selection = picks;
@@ -170,11 +195,19 @@ export class Viewer {
     for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
     const mpp = this.info?.mpp || ASSUMED_MPP, zoom = this.vs.zoom as number;
     const band = (this.band = bandAt(mpp, zoom).id);
-    for (const { source, style } of this.annotations) layers.push(...source.layers({ style, mpp, band, zoom }));
+    const top: Layer[] = [], f = this.focus;
+    for (const { source, style } of this.annotations) {
+      const own = source.layers({ style, mpp, band, zoom });
+      if (!f) layers.push(...own);
+      else if (source.layerId === f) top.push(...own);
+      else layers.push(...own.map((l) => l.clone({ opacity: (l.props.opacity ?? 1) * DIM, pickable: false })));
+    }
+    layers.push(...top);
     if (this.selection.length) {
       const size = Math.max(...this.annotations.map((p) => p.style.sizes[band]), 0);
       layers.push(...selectionLayers(this.selection, size, mpp));
     }
+    layers.push(...this.overlay);
     this.deck.setProps({ layers });
   }
 

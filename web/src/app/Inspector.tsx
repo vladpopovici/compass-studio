@@ -1,6 +1,9 @@
 // Selected objects: identity, group, position and their sparse attributes
-// (fetched lazily by id, GET /layers/{id}/objects).
-import { X } from "lucide-react";
+// (fetched lazily by id, GET /layers/{id}/objects). With an editing server,
+// the group and attributes are editable (milestone 7): each change is one
+// commit; the block at the top applies to every selected object.
+import { Plus, X } from "lucide-react";
+import { useState } from "react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
 import type { ObjectPick } from "@/viewer/annstyle";
@@ -18,14 +21,82 @@ function measure(v: number) {
   return v >= 1000 ? fmt(Math.round(v)) : v.toPrecision(4).replace(/\.?0+$/, "");
 }
 
+export interface InspectorEdit {
+  onGroup: (picks: ObjectPick[], group: number) => void;
+  onValues: (picks: ObjectPick[], values: Record<string, number | null>) => void;
+  onDelete: () => void;
+  /** attribute names known to the stores, for suggestions */
+  names: string[];
+}
+
+/** A number field that commits on Enter or when it loses focus (empty: remove). */
+function ValueField({ value, label, onCommit }: { value: number; label: string; onCommit: (v: number | null) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const commit = () => {
+    if (text === null) return;
+    const t = text.trim();
+    setText(null);
+    if (t === "") onCommit(null);
+    else if (Number.isFinite(+t) && +t !== value) onCommit(+t);
+  };
+  return (
+    <input value={text ?? String(value)} aria-label={label} inputMode="decimal"
+           className="w-full rounded border border-transparent bg-transparent px-1 text-right font-mono tabular-nums hover:border-border focus:border-border"
+           onChange={(e) => setText(e.target.value)} onBlur={commit}
+           onKeyDown={(e) => {
+             if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+             if (e.key === "Escape") { setText(null); (e.target as HTMLInputElement).blur(); }
+           }} />
+  );
+}
+
+/** Name and value of an attribute to set; suggestions from the stores. */
+function AddValue({ names, onAdd, label }: { names: string[]; onAdd: (name: string, v: number) => void; label: string }) {
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const ok = name.trim() !== "" && value.trim() !== "" && Number.isFinite(+value);
+  return (
+    <form className="mt-1 flex items-center gap-1 px-1" onSubmit={(e) => {
+      e.preventDefault();
+      if (!ok) return;
+      onAdd(name.trim(), +value);
+      setName("");
+      setValue("");
+    }}>
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="attribute" list="cs-attribute-names"
+             aria-label={`${label} name`} className="min-w-0 flex-1 rounded border border-border bg-transparent px-1" />
+      <input value={value} onChange={(e) => setValue(e.target.value)} placeholder="value" inputMode="decimal"
+             aria-label={`${label} value`} className="w-16 rounded border border-border bg-transparent px-1 text-right font-mono" />
+      <Button size="icon" type="submit" disabled={!ok} aria-label={label} title={label}><Plus /></Button>
+    </form>
+  );
+}
+
+function GroupSelect({ layer, value, onChange, label }: {
+  layer: LayerInfo; value: number | null; onChange: (g: number) => void; label: string;
+}) {
+  return (
+    <select value={value ?? ""} aria-label={label} onChange={(e) => onChange(+e.target.value)}
+            className="w-full truncate rounded border border-transparent bg-transparent hover:border-border">
+      {value === null && <option value="">mixed</option>}
+      {layer.groups.map((g) => <option key={g.index} value={g.index} className="bg-background">{g.name}</option>)}
+    </select>
+  );
+}
+
 export function objectKey(p: { layerId: string; objectId: number }) {
   return `${p.layerId}|${p.objectId}`;
 }
 
-export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, onClose }: {
+export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, onClose, edit }: {
   selection: ObjectPick[]; layers: Map<string, LayerInfo>; objects: Record<string, ObjectInfo | "error">;
   mpp: number | null | undefined; onClear: () => void; onRemove: (p: ObjectPick) => void; onClose: () => void;
+  /** editing actions; absent when the server cannot edit */
+  edit?: InspectorEdit;
 }) {
+  const oneLayer = selection.length > 1 && selection.every((p) => p.layerId === selection[0].layerId)
+    ? layers.get(selection[0].layerId) : undefined;
+  const groups = new Set(selection.map((p) => p.group));
   return (
     <>
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border px-2">
@@ -35,6 +106,23 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
         <Button size="icon" aria-label="Close inspector" title="Close (])" onClick={onClose}><X /></Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {edit && <datalist id="cs-attribute-names">{edit.names.map((n) => <option key={n} value={n} />)}</datalist>}
+        {edit && selection.length > 1 && (
+          <section className="border-b border-border bg-muted/40 p-2" data-selection-edit>
+            <p className="mb-1 font-medium">All {selection.length} selected</p>
+            {oneLayer && (
+              <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 px-1">
+                <span className="text-muted-foreground">Group</span>
+                <GroupSelect layer={oneLayer} value={groups.size === 1 ? selection[0].group : null} label="Group of all selected"
+                             onChange={(g) => edit.onGroup(selection, g)} />
+              </div>
+            )}
+            <AddValue names={edit.names} label="Set attribute on all selected" onAdd={(n, v) => edit.onValues(selection, { [n]: v })} />
+            <div className="mt-1 flex justify-end px-1">
+              <Button variant="outline" onClick={edit.onDelete}>Delete all</Button>
+            </div>
+          </section>
+        )}
         {!selection.length && (
           <p className="p-2 text-muted-foreground">Click an object to inspect it; Shift+click adds to the selection.</p>
         )}
@@ -54,7 +142,11 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-1">
                 <dt className="text-muted-foreground">Id</dt><dd className="font-mono tabular-nums">{p.objectId}</dd>
                 <dt className="text-muted-foreground">Layer</dt><dd className="truncate">{layer?.name ?? p.layerId}</dd>
-                <dt className="text-muted-foreground">Group</dt><dd className="truncate">{group?.name ?? p.group}</dd>
+                <dt className="text-muted-foreground">Group</dt>
+                <dd className="truncate">
+                  {edit && layer ? <GroupSelect layer={layer} value={p.group} label="Group" onChange={(g) => edit.onGroup([p], g)} />
+                    : group?.name ?? p.group}
+                </dd>
                 <dt className="text-muted-foreground">Type</dt><dd>{o && o !== "error" ? o.type : p.kind}</dd>
                 <dt className="text-muted-foreground">{p.kind === "point" ? "Position" : "Centre"}</dt>
                 <dd className="font-mono tabular-nums">{fmt(p.x, 1)}, {fmt(p.y, 1)} px</dd>
@@ -75,15 +167,24 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
                   <table className="mt-1 w-full">
                     <tbody>
                       {values.map(([k, v]) => (
-                        <tr key={k} className="hover:bg-accent">
+                        <tr key={k} className="group hover:bg-accent">
                           <td className="truncate px-1 text-muted-foreground">{k}</td>
-                          <td className="px-1 text-right font-mono tabular-nums">{value(v)}</td>
+                          <td className="px-1 text-right font-mono tabular-nums">
+                            {edit ? <ValueField value={v} label={k} onCommit={(nv) => edit.onValues([p], { [k]: nv })} /> : value(v)}
+                          </td>
+                          {edit && (
+                            <td className="w-5">
+                              <button className="invisible text-muted-foreground group-hover:visible hover:text-foreground" title={`Remove ${k}`}
+                                      aria-label={`Remove ${k}`} onClick={() => edit.onValues([p], { [k]: null })}><X className="size-3.5" /></button>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 ) : <p className="mt-1 px-1 text-muted-foreground">No attributes.</p>
               )}
+              {edit && o && o !== "error" && <AddValue names={edit.names} label="Add attribute" onAdd={(n, v) => edit.onValues([p], { [n]: v })} />}
             </section>
           );
         })}
