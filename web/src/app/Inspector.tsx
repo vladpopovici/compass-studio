@@ -3,7 +3,7 @@
 // the group and attributes are editable (milestone 7): each change is one
 // commit; the block at the top applies to every selected object.
 import { Plus, X } from "lucide-react";
-import { useState } from "react";
+import { useState, memo } from "react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
 import type { ObjectPick } from "@/viewer/annstyle";
@@ -88,7 +88,7 @@ export function objectKey(p: { layerId: string; objectId: number }) {
   return `${p.layerId}|${p.objectId}`;
 }
 
-export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, onClose, edit }: {
+export const Inspector = memo(function Inspector({ selection, layers, objects, mpp, onClear, onRemove, onClose, edit }: {
   selection: ObjectPick[]; layers: Map<string, LayerInfo>; objects: Record<string, ObjectInfo | "error">;
   mpp: number | null | undefined; onClear: () => void; onRemove: (p: ObjectPick) => void; onClose: () => void;
   /** editing actions; absent when the server cannot edit */
@@ -191,4 +191,4 @@ export function Inspector({ selection, layers, objects, mpp, onClear, onRemove, 
       </div>
     </>
   );
-}
+});

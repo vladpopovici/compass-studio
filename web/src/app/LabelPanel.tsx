@@ -1,4 +1,5 @@
 // Label maps of the current image: visibility, opacity, outline, classes.
+import { memo } from "react";
 import { Eye, EyeOff, Square, SquareDashed } from "lucide-react";
 import type { ImageInfo } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -70,7 +71,7 @@ function MapCard({ m, onChange }: { m: LabelMapState; onChange: (s: LabelStyle) 
   );
 }
 
-export function LabelPanel({ maps, onChange }: { maps: LabelMapState[]; onChange: (id: string, s: LabelStyle) => void }) {
+export const LabelPanel = memo(function LabelPanel({ maps, onChange }: { maps: LabelMapState[]; onChange: (id: string, s: LabelStyle) => void }) {
   if (!maps.length) return <p className="p-2 text-muted-foreground">No label maps for this image.</p>;
   return <div>{maps.map((m) => <MapCard key={m.info.id} m={m} onChange={(s) => onChange(m.info.id, s)} />)}</div>;
-}
+});

@@ -3,7 +3,7 @@
 // contrast from the image's histogram, and the viewer's changes remembered per
 // image in this browser (localStorage; nothing is written beside the slides).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getJSON, type ImageInfo, type Schemas } from "@/api";
 import { MAX_SHOWN, type ChannelSetting } from "@/viewer/channels";
 
@@ -107,5 +107,5 @@ export function useChannels(info: ImageInfo | null): Channels {
     save(multi.id, null);
     setSettings(initialSettings(multi, histogram));
   }, [multi, histogram]);
-  return { settings, histogram, set, setAll, reset };
+  return useMemo(() => ({ settings, histogram, set, setAll, reset }), [settings, histogram, set, setAll, reset]);
 }

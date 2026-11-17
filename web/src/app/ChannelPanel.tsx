@@ -1,5 +1,6 @@
 // Channels of a multichannel image: which are shown (at most 8, added
 // together), their colour and contrast window, over each channel's histogram.
+import { memo } from "react";
 import { Wand2 } from "lucide-react";
 import type { ImageInfo } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -93,7 +94,7 @@ function ChannelRow({ info, c, s, h, canShow, set }: {
   );
 }
 
-export function ChannelPanel({ info, ch }: { info: ImageInfo; ch: Channels }) {
+export const ChannelPanel = memo(function ChannelPanel({ info, ch }: { info: ImageInfo; ch: Channels }) {
   const shown = ch.settings.filter((s) => s.visible).length;
   if (!ch.settings.length) return <p className="p-2 text-muted-foreground">Loading channels…</p>;
   return (
@@ -118,4 +119,4 @@ export function ChannelPanel({ info, ch }: { info: ImageInfo; ch: Channels }) {
       </div>
     </div>
   );
-}
+});

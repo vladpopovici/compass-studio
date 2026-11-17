@@ -469,6 +469,27 @@ sidebar (tabs Layers and Labels) and a right inspector, both collapsible
 (`[`, `]`) and resizable. dockview is deferred until the annotation table
 and minimap need free docking (they were not part of milestone 7). Selection: click, Shift+click
 to add, Esc to clear; hover names the point in the status bar.
+Rendering review (2026-11-17, at the owner's request: the view seemed to lag,
+with little data), chosen from options. Firefox profiles (workstation,
+headless, the sample slide with its tissue map and 14 annotations) showed
+React re-rendering the whole application on every view change and mouse
+move (about 200 renders per 3 s pan, 2.7 ms each), and the remaining main-
+thread time going to new image and label tiles (texture upload and a deck
+layer per tile) and drawing. Changes: the view, the cursor and the object
+under it are kept outside React state (`web/src/app/live.ts`); only the
+status bar and the zoom readout subscribe, and the panels get the zoom when
+the view settles (300 ms) or crosses a size band. The panels are memoized
+with stable callbacks. Wheel zoom applies at once (smooth zoom animated
+each step over about 250 ms, so the view trailed the wheel) and the glide
+after a drag is 120 ms (was 300 ms). Measured, main-thread busy time
+before and after: pan 25 % to 16 %, hover 20 % to 13 %, wheel zoom 51 % to
+26 %; React time from 83 to 149 ms per second to under 10 ms. Frames stay
+at 60 fps when panning; wheel zoom keeps some 33 to 66 ms frames while new
+tiles arrive (also with the synthetic store of the end-to-end test).
+Rejected for now: drawing all tiles of a layer with one shared GPU program
+to cut the per-tile cost (a large change inside deck's tile layer for a
+moderate gain; revisit if the laptop or real stores show zoom stutter).
+Not measured: the laptop, Chromium.
 
 ### D10. Security and privacy
 Slides may be sensitive. The server binds to 127.0.0.1 by default; a random

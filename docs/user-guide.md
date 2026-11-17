@@ -92,8 +92,8 @@ width is remembered in this browser.
 
 ### Mouse
 
-- Drag: pan.
-- Wheel: zoom around the cursor.
+- Drag: pan. The view glides on briefly (about 0.1 s) after a quick drag.
+- Wheel: zoom around the cursor; each step applies at once.
 - Hover: the status bar shows the cursor position, the annotation object
   under it (layer, group, id), the values of the shown channels
   (multichannel images) and the label values under it.

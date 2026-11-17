@@ -4,7 +4,7 @@
 import {
   Circle, Dot, Lasso, LoaderCircle, Lock, MousePointer2, Move, Pentagon, Redo2, Spline, Square, Trash2, Undo2, X,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, memo } from "react";
 import type * as React from "react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -43,7 +43,7 @@ const noTypeahead = (e: React.KeyboardEvent) => {
   if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) e.preventDefault();
 };
 
-export function EditBar(props: {
+export const EditBar = memo(function EditBar(props: {
   tool: Tool; onTool: (t: Tool) => void;
   canUndo: boolean; canRedo: boolean; onUndo: () => void; onRedo: () => void;
   canDelete: boolean; onDelete: () => void;
@@ -102,7 +102,7 @@ export function EditBar(props: {
       {props.work && <><div className="mx-1 h-4 w-px bg-border" />{props.work}</>}
     </div>
   );
-}
+});
 
 /** "Working in: layer", with a button to release it. */
 export function WorkChip({ layer, onRelease }: { layer: string; onRelease: () => void }) {

@@ -1,6 +1,7 @@
 // Annotation layers of the current image: stores > layers > groups, with
 // visibility, sizes, fill and outline, opacity and per-group colours.
 // Sliders show only what is drawn at the current zoom.
+import { memo } from "react";
 import { Eye, EyeOff, LoaderCircle, Lock, LockOpen } from "lucide-react";
 import type { LayerInfo, Schemas } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -195,7 +196,7 @@ function LayerCard({ l, scale, onChange, edit, work, onWork }: {
   );
 }
 
-export function LayersPanel({ stores, layers, mpp, zoom, onChange, edit, work, onWork }: {
+export const LayersPanel = memo(function LayersPanel({ stores, layers, mpp, zoom, onChange, edit, work, onWork }: {
   stores: Schemas["Store"][]; layers: LayerState[]; mpp: number | null | undefined; zoom: number;
   onChange: (id: string, s: AnnStyle) => void; edit?: LayerEdit;
   work: Work | null; onWork: (w: Work | null) => void;
@@ -215,4 +216,4 @@ export function LayersPanel({ stores, layers, mpp, zoom, onChange, edit, work, o
       ))}
     </div>
   );
-}
+});

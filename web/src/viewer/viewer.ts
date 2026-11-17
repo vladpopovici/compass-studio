@@ -35,7 +35,9 @@ export interface ViewerOptions {
 }
 
 const ANIMATE_MS = 180;
-const CONTROLLER = { inertia: 300, scrollZoom: { speed: 0.02, smooth: true }, keyboard: false, doubleClickZoom: true };
+// Wheel zoom applies at once (smooth: true animated each notch over about
+// 250 ms, so the view trailed the wheel); a short glide after a drag.
+const CONTROLLER = { inertia: 120, scrollZoom: { speed: 0.02, smooth: false }, keyboard: false, doubleClickZoom: true };
 /** opacity factor of annotation layers other than the working layer */
 const DIM = 0.35;
 

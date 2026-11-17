@@ -7,8 +7,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getJSON, type ImageInfo } from "@/api";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { DEFAULT_STYLE, type LabelClass, type LabelStyle } from "@/viewer/labels";
-import { DEFAULT_ANN_STYLE, type ObjectPick } from "@/viewer/annstyle";
+import { DEFAULT_STYLE, type LabelStyle } from "@/viewer/labels";
+import { ASSUMED_MPP, bandAt, DEFAULT_ANN_STYLE, type ObjectPick } from "@/viewer/annstyle";
 import { DRAW_TOOLS, editorLayer, type Tool } from "@/viewer/edits";
 import type { View, Viewer } from "@/viewer/viewer";
 import { useAnnotations, useObjects } from "./annotations";
@@ -19,6 +19,7 @@ import { useEditing } from "./editing";
 import { Inspector, objectKey } from "./Inspector";
 import { LabelPanel, type LabelMapState } from "./LabelPanel";
 import { LayersPanel, layerName, type Work } from "./LayersPanel";
+import { Live, useStable } from "./live";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { Toolbar } from "./Toolbar";
@@ -47,16 +48,18 @@ export function App() {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [imageId, setImageId] = useState<string | null>(null);
-  const [view, setView] = useState<View | null>(null);
-  const [cursor, setCursor] = useState<[number, number] | null>(null);
-  const [tiles, setTiles] = useState("");
+  // per-frame values: only the status bar and the zoom readout subscribe (live.ts)
+  const live = useMemo(() => ({
+    view: new Live<View | null>(null), cursor: new Live<[number, number] | null>(null), hover: new Live<ObjectPick | null>(null),
+  }), []);
+  /** the zoom once the view settles (or crosses a size band): for the panels, which need not follow every frame */
+  const [zoom, setZoom] = useState(0);
   const [styles, setStyles] = useState<Record<string, LabelStyle>>({});
   const [values, setValues] = useState<Record<string, number[]>>({});
   const [left, setLeft] = useState(true);
   const [right, setRight] = useState(false);
   const [tab, setTab] = useState<string | null>(null);
   const [selection, setSelection] = useState<ObjectPick[]>([]);
-  const [hoverPick, setHoverPick] = useState<ObjectPick | null>(null);
   const restore = useRef(initialView());
 
   useEffect(() => {
@@ -78,9 +81,29 @@ export function App() {
   const image = images.find((i) => i.id === imageId) ?? null;
   const multi = image?.display === "channels" ? image : null;
   const labelInfos = useMemo(() => all.filter((i) => i.role === "labels" && i.aligned_to === imageId), [all, imageId]);
-  const maps: LabelMapState[] = labelInfos.map((info) => ({
+  const maps: LabelMapState[] = useMemo(() => labelInfos.map((info) => ({
     info, style: styles[info.id] ?? DEFAULT_STYLE, values: values[info.id] ?? [],
-  }));
+  })), [labelInfos, styles, values]);
+
+  // the URL and the settled zoom follow the view 300 ms after it stops
+  const urlImage = useRef<string | null>(null);
+  urlImage.current = image?.id ?? null;
+  const mppRef = useRef(ASSUMED_MPP);
+  mppRef.current = image?.mpp || ASSUMED_MPP;
+  const zoomRef = useRef(zoom);
+  const settleTimer = useRef(0);
+  const onView = useCallback((v: View) => {
+    live.view.set(v);
+    const settle = () => {
+      if (zoomRef.current !== v.zoom) setZoom((zoomRef.current = v.zoom));
+    };
+    if (bandAt(mppRef.current, zoomRef.current).id !== bandAt(mppRef.current, v.zoom).id) settle();
+    clearTimeout(settleTimer.current);
+    settleTimer.current = window.setTimeout(() => {
+      settle();
+      if (urlImage.current) writeUrl(urlImage.current, v);
+    }, 300);
+  }, [live]);
 
   useEffect(() => {
     if (!viewer) return;
@@ -116,7 +139,7 @@ export function App() {
   });
   const { objects, invalidate } = useObjects(selection);
   const layerById = useMemo(() => new Map(ann.layers.map((l) => [l.info.id, l.info])), [ann.layers]);
-  const edit = useEditing({ imageId: image?.id ?? null, ann, selection, setSelection, invalidate, zoom: view?.zoom ?? 0 });
+  const edit = useEditing({ imageId: image?.id ?? null, ann, selection, setSelection, invalidate, zoom });
   const canEdit = ann.stores.some((s) => s.editable);
   // the working layer: on top, the only one pickable, the others dimmed
   const [work, setWork] = useState<Work | null>(null);
@@ -138,7 +161,9 @@ export function App() {
     viewer?.setFocus(work);
   }, [viewer, work]);
   const workInfo = work ? layerById.get(work) : undefined;
-  const workChip = workInfo ? <WorkChip layer={layerName(workInfo)} onRelease={() => setWork(null)} /> : null;
+  const releaseWork = useCallback(() => setWork(null), []);
+  const workName = workInfo ? layerName(workInfo) : null;
+  const workChip = useMemo(() => (workName ? <WorkChip layer={workName} onRelease={releaseWork} /> : null), [workName, releaseWork]);
   const [newLayer, setNewLayer] = useState(false);
   /** "Discard changes" (true) or "Discard edits" of a layer (its id) waiting for confirmation */
   const [discardAsk, setDiscardAsk] = useState<boolean | string>(false);
@@ -171,18 +196,18 @@ export function App() {
     const info = tool === "modify" ? layerById.get(checkout!.layerId) ?? null : targetInfo;
     const style = info ? ann.layers.find((l) => l.info.id === info.id)?.style ?? DEFAULT_ANN_STYLE : null;
     viewer.setEditor(editorLayer({ tool, features: tool === "modify" ? checkout!.features : pending, style, info, onEdit,
-                                   zoom: view?.zoom ?? 0, mpp: image?.mpp ?? null }), DRAW_TOOLS.has(tool));
+                                   zoom, mpp: image?.mpp ?? null }), DRAW_TOOLS.has(tool));
   }, [viewer, tool, checkout, pending, onEdit, drawTick, targetInfo, layerById, ann.layers]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     setSelection([]);
-    setHoverPick(null);
+    live.hover.set(null);
     setWork(null);
-  }, [imageId]);
+  }, [imageId, live]);
 
   const onHover = useCallback((p: [number, number] | null, pickInfo: ObjectPick | null) => {
-    setCursor(p);
-    setHoverPick(pickInfo);
-  }, []);
+    live.cursor.set(p);
+    live.hover.set(pickInfo);
+  }, [live]);
   const toolRef = useRef<Tool>("select");
   toolRef.current = edit.tool;
   const onClick = useCallback((pk: ObjectPick | null, add: boolean) => {
@@ -199,36 +224,33 @@ export function App() {
     setRight(true);
   }, []);
 
-  const hoverPoint = useMemo(() => {
-    if (!hoverPick) return "";
-    const l = layerById.get(hoverPick.layerId);
-    const g = l?.groups.find((x) => x.index === hoverPick.group);
-    return `${l?.name ?? hoverPick.layerId} › ${g?.name ?? hoverPick.group} #${hoverPick.objectId}`;
-  }, [hoverPick, layerById]);
+  // what is drawn under the cursor changes with label styles and channel settings
+  const drawnUnder = useMemo(() => [styles, ch.settings], [styles, ch.settings]);
 
-  const hoverLabels = useMemo(() => {
-    if (!viewer || !cursor) return "";
-    const channels = image ? viewer.channelsAt(cursor[0], cursor[1]).map(({ channel, value }) => `${image.channels[channel]} ${value}`) : [];
-    return [...channels, ...viewer.labelsAt(cursor[0], cursor[1]).map(({ info, value }) => {
-      if (value === info.background) return "";
-      const c = ((info.classes ?? []) as LabelClass[]).find((x) => x.value === value);
-      return `${info.name ?? info.id}: ${value}${c ? ` ${c.name}` : ""}`;
-    })].filter(Boolean).join("  ");
-    // styles and channel settings: visibility changes what is under the cursor
-  }, [viewer, cursor, styles, ch.settings, image]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // URL follows the view, at most every 300 ms
-  useEffect(() => {
-    if (!image) return;
-    const t = setTimeout(() => writeUrl(image.id, view), 300);
-    return () => clearTimeout(t);
-  }, [image, view]);
-
-  useEffect(() => {
-    if (!viewer) return;
-    const t = setInterval(() => setTiles(viewer.stats.summaryLine()), 500);
-    return () => clearInterval(t);
-  }, [viewer]);
+  // stable callbacks for the memoized panels
+  const zoomBy = useStable((d: number) => viewer?.zoomBy(d));
+  const fit = useStable(() => viewer?.fit());
+  const oneToOne = useStable(() => viewer?.zoomTo(0));
+  const toggleLeft = useCallback(() => setLeft((v) => !v), []);
+  const toggleRight = useCallback(() => setRight((v) => !v), []);
+  const onWork = useStable(lockWork);
+  const saveLayer = useStable((id: string) => void edit.saveLayer(id));
+  const layerEdit = useMemo(() => (canEdit ? { onSave: saveLayer, onDiscard: (id: string) => setDiscardAsk(id) } : undefined),
+                            [canEdit, saveLayer]);
+  const setTool = useStable(edit.setTool);
+  const setTarget = useStable(edit.setTarget);
+  const undo = useStable(() => void edit.undo());
+  const redo = useStable(() => void edit.redo());
+  const deleteSelected = useStable(() => void edit.deleteSelected());
+  const askDiscard = useCallback(() => setDiscardAsk(true), []);
+  const askNewLayer = useCallback(() => setNewLayer(true), []);
+  const setObjectGroup = useStable((p: ObjectPick[], g: number) => void edit.setGroup(p, g));
+  const setObjectValues = useStable((p: ObjectPick[], v: Parameters<typeof edit.setValues>[1]) => void edit.setValues(p, v));
+  const inspectorEdit = useMemo(() => (canEdit ? { onGroup: setObjectGroup, onValues: setObjectValues, onDelete: deleteSelected, names } : undefined),
+                                [canEdit, setObjectGroup, setObjectValues, deleteSelected, names]);
+  const clearSelection = useCallback(() => setSelection([]), []);
+  const closeInspector = useCallback(() => setRight(false), []);
+  const removeFromSelection = useCallback((p: ObjectPick) => setSelection((old) => old.filter((o) => objectKey(o) !== objectKey(p))), []);
 
   // a picked image opens fitted; only the image in the initial URL restores its view
   const pick = useCallback((id: string) => {
@@ -305,9 +327,9 @@ export function App() {
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col">
-        <Toolbar images={images} image={image} view={view} onImage={pick}
-                 onZoomBy={(d) => viewer?.zoomBy(d)} onFit={() => viewer?.fit()} onOneToOne={() => viewer?.zoomTo(0)}
-                 left={left} onLeft={() => setLeft((v) => !v)} right={right} onRight={() => setRight((v) => !v)} />
+        <Toolbar images={images} image={image} view={live.view} onImage={pick}
+                 onZoomBy={zoomBy} onFit={fit} onOneToOne={oneToOne}
+                 left={left} onLeft={toggleLeft} right={right} onRight={toggleRight} />
         <div className="flex min-h-0 flex-1">
           {left && (
             <Sidebar side="left" label="Sidebar">
@@ -322,9 +344,8 @@ export function App() {
                 </TabsList>
                 <TabsContent value="layers">
                   {ann.error && <p className="p-2 text-red-400">{ann.error}</p>}
-                  <LayersPanel stores={ann.stores} layers={ann.layers} mpp={image?.mpp} zoom={view?.zoom ?? 0}
-                               onChange={ann.setStyle} work={work} onWork={lockWork}
-                               edit={canEdit ? { onSave: (id) => void edit.saveLayer(id), onDiscard: (id) => setDiscardAsk(id) } : undefined} />
+                  <LayersPanel stores={ann.stores} layers={ann.layers} mpp={image?.mpp} zoom={zoom}
+                               onChange={ann.setStyle} work={work} onWork={onWork} edit={layerEdit} />
                 </TabsContent>
                 <TabsContent value="labels"><LabelPanel maps={maps} onChange={setStyle} /></TabsContent>
                 {multi && <TabsContent value="channels"><ChannelPanel info={multi} ch={ch} /></TabsContent>}
@@ -332,14 +353,14 @@ export function App() {
             </Sidebar>
           )}
           <main className="relative min-w-0 flex-1">
-            <ViewerPane onReady={setViewer} onView={setView} onHover={onHover} onClick={onClick} />
+            <ViewerPane onReady={setViewer} onView={onView} onHover={onHover} onClick={onClick} />
             {canEdit && image && (
-              <EditBar tool={edit.tool} onTool={edit.setTool} canUndo={edit.canUndo} canRedo={edit.canRedo}
-                       onUndo={() => void edit.undo()} onRedo={() => void edit.redo()}
-                       canDelete={selection.length > 0} onDelete={() => void edit.deleteSelected()}
-                       sessionEdits={edit.sessionEdits} onDiscard={() => setDiscardAsk(true)}
-                       layers={ann.layers} target={edit.target} onTarget={edit.setTarget}
-                       canCreate={canEdit} onNewLayer={() => setNewLayer(true)} work={workChip} />
+              <EditBar tool={edit.tool} onTool={setTool} canUndo={edit.canUndo} canRedo={edit.canRedo}
+                       onUndo={undo} onRedo={redo}
+                       canDelete={selection.length > 0} onDelete={deleteSelected}
+                       sessionEdits={edit.sessionEdits} onDiscard={askDiscard}
+                       layers={ann.layers} target={edit.target} onTarget={setTarget}
+                       canCreate={canEdit} onNewLayer={askNewLayer} work={workChip} />
             )}
             {!canEdit && workChip && (
               <div className="absolute top-2 left-1/2 z-10 -translate-x-1/2 rounded-md border border-border bg-background/90 p-0.5 shadow">{workChip}</div>
@@ -353,11 +374,8 @@ export function App() {
           </main>
           {right && (
             <Sidebar side="right" label="Inspector">
-              <Inspector selection={selection} layers={layerById} objects={objects} mpp={image?.mpp}
-                         edit={canEdit ? { onGroup: (p, g) => void edit.setGroup(p, g), onValues: (p, v) => void edit.setValues(p, v),
-                                           onDelete: () => void edit.deleteSelected(), names } : undefined}
-                         onClear={() => setSelection([])} onClose={() => setRight(false)}
-                         onRemove={(p) => setSelection((old) => old.filter((o) => objectKey(o) !== objectKey(p)))} />
+              <Inspector selection={selection} layers={layerById} objects={objects} mpp={image?.mpp} edit={inspectorEdit}
+                         onClear={clearSelection} onClose={closeInspector} onRemove={removeFromSelection} />
             </Sidebar>
           )}
         </div>
@@ -387,7 +405,8 @@ export function App() {
                             void edit.createLayer(st, n, g);
                           }} />
         )}
-        <StatusBar image={image} view={view} cursor={cursor} tiles={tiles} labels={hoverLabels} point={hoverPoint} />
+        <StatusBar viewer={viewer} image={image} view={live.view} cursor={live.cursor} hover={live.hover}
+                   layers={layerById} drawn={drawnUnder} />
       </div>
     </TooltipProvider>
   );
