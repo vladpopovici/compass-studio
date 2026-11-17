@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 8 done (2026-11-17); next is milestone 9. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 9 done (2026-11-17). First entry 2026-11-12. Name chosen 2026-11-12. License: MIT (2026-11-17). Several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -504,7 +504,35 @@ Monorepo: `contract/`, `server/` (Python, uv), `web/` (TypeScript, Vite, pnpm),
 the repository is solely authored by its owner. Name: CompassStudio. Slugs always
 use a separator (`compass-studio`, `compass_studio`), because the lowercase run
 `compassstudio` has three consecutive s characters and is typo-prone. Slide data,
-sample stores and manifests live in a gitignored `data/` directory. License: open.
+sample stores and manifests live in a gitignored `data/` directory. License: MIT (chosen 2026-11-17; `LICENSE` at the root, linked from `server/` so the wheel carries it).
+Packaging (milestone 9, 2026-11-17), chosen by the owner from options: one
+wheel, `compass-studio` (version 0.1.0; the distribution was
+`compass-studio-server`), holding the server and the built client as
+`compass_studio/web` (a hatch build hook, `server/hatch_build.py`, runs
+`pnpm build`; benches and source maps left out; 0.7 MB). Installed with
+`uv tool install`, so users need no Node.js; built from a checkout with
+`uv build --wheel` (an sdist has no client sources). The command takes
+paths: `compass-studio SLIDE.zarr` serves the slide with `SLIDE.*.zarr`
+(label maps) and `SLIDE.ann.sqlite` / `SLIDE.*.ann.sqlite` next to it, a
+folder as `--images`, a `.ann.sqlite` file as a store; the bundled client
+is served by default (`--web` overrides it, `--no-web` serves the API
+only; in a checkout `web/dist`), `--open` opens the browser once the
+server listens, a busy port is a clear error, `--version`.
+`compass-studio-serve` remains as an alias. Rejected: a launcher script
+in the checkout (Node.js and a clone on every machine), a standalone
+binary (about 200 MB per platform with numpy, pyarrow and shapely, fragile
+native bundling), a container image (volume mounts and sidecar
+permissions on a desktop); subcommands (`compass-studio serve …`) and
+keeping only the flags. A root `README.md` was added. `claude-resume`, an
+assistant session file tracked since the S2 laptop commit, was removed
+from the index and ignored (it remains in history). Tested: the wheel
+installed with `uv tool install` into a scratch directory, run from
+outside the checkout (the sample slide with its tissue map and store
+found by name; slide plus its folder served once; busy port; `--open`
+with a stand-in `$BROWSER`); the end-to-end test against it (77 checks,
+with editing on a scratch sidecar); server tests. Not tested: other
+Linux distributions, macOS and Windows, installing on a machine without
+the uv cache (the wheel's dependencies come from PyPI).
 
 ## 5. Rejected alternatives (summary)
 
@@ -535,7 +563,7 @@ baseline (D5).
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
    undo and redo, commits with revisions. Done 2026-11-16.
 8. Multichannel. Done 2026-11-17 (synthetic data only).
-9. Packaging (one command to serve a slide) and documentation.
+9. Packaging (one command to serve a slide) and documentation. Done 2026-11-17.
 
 ## 8. Open items
 
@@ -546,7 +574,6 @@ baseline (D5).
   edits in one session) are drawn by the overlay without a limit; a
   reload resets them into the bulk data.
 
-- License.
 - Frozen COMPASS annotation-schema document (ideally in the COMPASS repository).
 - Merge-back path from sidecar layers to a COMPASS store.
 - dockview maintenance status; browser Blosc-bitshuffle decode (only relevant if

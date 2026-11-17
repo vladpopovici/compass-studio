@@ -34,3 +34,9 @@ def make_client(tmp_path, synth_store, **kw):
 def client(tmp_path, synth_store):
     with make_client(tmp_path, synth_store, results_dir=tmp_path / "results") as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _free_port(monkeypatch):
+    """serve.main checks that its port is free; tests never listen (a running server must not fail them)."""
+    monkeypatch.setattr("compass_studio.serve.port_busy", lambda host, port: None)

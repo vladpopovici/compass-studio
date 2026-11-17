@@ -73,8 +73,8 @@ wheels = [
 ]
 
 [[package]]
-name = "compass-studio-server"
-version = "0.0.1"
+name = "compass-studio"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "crc32c" },

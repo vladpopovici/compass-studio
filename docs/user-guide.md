@@ -1,52 +1,90 @@
 # CompassStudio user guide
 
-CompassStudio shows COMPASS whole-slide images and their label maps in the
-browser. A local Python server reads the files; the browser only talks to
-that server. This guide covers every command and the viewer's controls. It
-describes what is implemented now (milestones 1 to 7: images, label maps,
-point, polygon and polyline annotations with picking, and editing them);
-multichannel images come later.
+CompassStudio shows COMPASS whole-slide images, their label maps and
+annotations in the browser, and edits the annotations. A local Python
+server reads the files; the browser only talks to that server. This guide
+covers every command and the viewer's controls: RGB and multichannel
+images, label maps, point, polygon and polyline annotations with picking,
+and editing them.
 
 ## 1. Requirements
 
 - Linux (other systems are untested).
-- [uv](https://docs.astral.sh/uv/) for the server (Python 3.12 or newer,
-  installed by uv when needed).
-- Node.js and [pnpm](https://pnpm.io/) to build the browser client.
+- [uv](https://docs.astral.sh/uv/) (Python 3.12 or newer, installed by uv
+  when needed).
 - A recent Firefox or Chromium with WebGL2.
+- Only to build from the repository: Node.js and [pnpm](https://pnpm.io/).
 
-## 2. Install and build
+## 2. Install
 
-From the repository root:
+### From a wheel
+
+The wheel (`compass_studio-VERSION-py3-none-any.whl`) holds the server and
+the built browser client:
+
+    uv tool install compass_studio-0.1.0-py3-none-any.whl
+
+This puts `compass-studio` (and the test-data tools of section 8) on the
+`PATH` (`~/.local/bin`; `uv tool update-shell` adds it if needed). To
+update, install the new wheel with `uv tool install --force …`; to remove,
+`uv tool uninstall compass-studio`. `compass-studio --version` prints the
+installed version.
+
+### Building the wheel
+
+From a repository checkout (needs Node.js and pnpm; the client is built
+into the wheel):
+
+    cd server && uv build --wheel      # into server/dist/
+
+Build from the checkout, not from an sdist: the sdist has no client
+sources. To bundle a client built elsewhere, set
+`COMPASS_STUDIO_WEB_DIST=path/to/dist`.
+
+### Running from a checkout
 
     cd server && uv sync          # server and its tools
     cd ../web && pnpm install && pnpm build   # browser client, into web/dist
 
-Run `uv sync` again after pulling changes that add commands, and
-`pnpm build` after changes to the client.
+Then run the commands below from `server/` with `uv run` in front
+(`uv run compass-studio …`); the client in `web/dist` is used. Run `uv
+sync` again after pulling changes that add commands, and `pnpm build`
+after changes to the client.
 
 ## 3. Start the server
 
-All commands below run from `server/` with `uv run`.
+    compass-studio /path/to/SLIDE.zarr --open
 
-    uv run compass-studio-serve --images ../data --web ../web/dist
+serves the slide and what belongs to it by name in its folder: label maps
+`SLIDE.*.zarr` (section 5) and annotation stores `SLIDE.ann.sqlite` and
+`SLIDE.*.ann.sqlite` (section 6), and opens the viewer in the default
+browser. Other ways to say what to serve:
 
-The server prints one line per image and label map, then a URL such as
+    compass-studio /path/to/folder             # every slide and store in the folder
+    compass-studio A.zarr B.zarr               # several slides
+    compass-studio SLIDE.zarr other/notes.ann.sqlite   # a store kept elsewhere
 
-    CompassStudio on http://127.0.0.1:8765/#token=O2Oov9Z3...
+The server prints one line per image, label map and store, then a URL such
+as
 
-Open that URL. The part after `#token=` is the session key; without it the
-viewer shows "Session token missing or wrong". A new random token is made
-at every start; set `COMPASS_STUDIO_TOKEN` to keep a fixed one:
+    CompassStudio 0.1.0 on http://127.0.0.1:8765/#token=O2Oov9Z3...
 
-    COMPASS_STUDIO_TOKEN=mysecret uv run compass-studio-serve --images ../data --web ../web/dist
+Without `--open`, open that URL yourself. The part after `#token=` is the
+session key; without it the viewer shows "Session token missing or
+wrong". A new random token is made at every start; set
+`COMPASS_STUDIO_TOKEN` to keep a fixed one:
 
-Stop the server with Ctrl+C.
+    COMPASS_STUDIO_TOKEN=mysecret compass-studio SLIDE.zarr
+
+Stop the server with Ctrl+C. Edits go to a curation database next to each
+store (`<ID>.curation.sqlite`; see `--sidecar-dir` and `--read-only`
+below); the COMPASS files are never written.
 
 ### What to serve
 
 | Option | Meaning |
 |---|---|
+| `PATH …` | a slide (`SLIDE.zarr`, with its label maps and stores by name), a folder (as `--images`) or an annotation store (`.ann.sqlite`). A file reached twice (a slide and its folder) is served once. |
 | `--images DIR` | every COMPASS `.zarr` folder and every annotation store (`*.ann.sqlite`) directly in `DIR`; id = file or folder name without `.zarr` / `.ann.sqlite`. Label maps and stores are paired with their slide by name (sections 5 and 6). Repeatable. |
 | `--image ID=PATH` | one `.zarr` folder under the id `ID`. Repeatable. |
 | `--labels ID=PATH` | one label map (`.zarr`, a single integer channel). Repeatable. |
@@ -68,7 +106,9 @@ Stop the server with Ctrl+C.
 | `--host HOST`, `--port PORT` | address to listen on; default `127.0.0.1:8765`. |
 | `--allow-other-interfaces` | required to listen on anything but 127.0.0.1. Slides may be sensitive: prefer an SSH tunnel (below). |
 | `--allow-origin ORIGIN` | an extra allowed browser origin, e.g. the development server (section 9). |
-| `--web DIR` | the built client to serve at `/` (normally `../web/dist`). Without it only the API is served. |
+| `--web DIR` | a built client to serve at `/` instead of the bundled one (from a checkout: `web/dist`). |
+| `--no-web` | serve the API only. |
+| `--open` | open the viewer in the default browser once the server is up (`$BROWSER` chooses it). |
 | `--tile-threads N` | threads that read and encode tiles; default one per available CPU. |
 | `--reader {auto,zarr}` | `auto` (default) uses the fast direct shard reader where possible; `zarr` forces zarr-python. |
 
@@ -432,7 +472,9 @@ changed objects are redrawn without a reload.
 
 ## 8. Test data
 
-Keep generated data under `data/` (it is not committed).
+Keep generated data under `data/` (it is not committed). The commands are
+shown as run from a checkout (`uv run` in `server/`); with the wheel
+installed, drop `uv run`.
 
 A label map that follows the tissue of a real slide (four classes from
 colour: background, light tissue, eosin-rich, haematoxylin-rich), with its
@@ -449,7 +491,7 @@ slide's size, its mpp and a name that pairs:
 
     uv run compass-studio-synth ../data/m6 --name SLIDE.synth --no-arrow --width W --height H --mpp MPP \
         --points 300000 --cells 300000 --regions 30 --region-radius-px 800 6000 --lines 60 --attrs 8
-    uv run compass-studio-serve --images ../data --annotations SLIDE.synth=../data/m6/SLIDE.synth.ann.sqlite --web ../web/dist
+    uv run compass-studio ../data/SLIDE.zarr ../data/m6/SLIDE.synth.ann.sqlite
 
 (`W` and `H` are the slide's size in pixels, printed by the server at
 start-up.) Run `uv run compass-studio-synth --help` for all options (image
@@ -469,7 +511,7 @@ on the fly.
 
 Without any slide at hand:
 
-    uv run compass-studio-serve --synthetic big=200000x200000 --synthetic-labels big.lab=big --web ../web/dist
+    uv run compass-studio --synthetic big=200000x200000 --synthetic-labels big.lab=big
 
 ## 9. Development
 
@@ -479,8 +521,8 @@ Without any slide at hand:
 - `pnpm typecheck` checks the client; `pnpm gen:api` regenerates the
   TypeScript API types from `contract/openapi.yaml`.
 - Server and contract tests: in `server/`, `uv run pytest`.
-- End-to-end smoke test (headless Firefox; a server running with
-  `--web ../web/dist` and at least two images; it also checks label maps,
+- End-to-end smoke test (headless Firefox; a server running with the
+  client and at least two images; it also checks label maps,
   points, polygons and polylines when the first image has them: points
   with a layer of 1,000 points or more, polygons with 100 or more, such as
   the store above; and the Channels tab when a multichannel image is
@@ -493,7 +535,10 @@ Without any slide at hand:
   store layer), so start that server with `--sidecar-dir` pointing at a
   scratch directory, never at real curation databases.
 
-- Benchmark pages: `bench.html` on the same server; see `spikes/README.md`.
+- A release: set `version` in `server/pyproject.toml`, then `uv build
+  --wheel` in `server/` (section 2). The wheel leaves out the benchmark
+  pages and source maps.
+- Benchmark pages: `bench.html` on a server running from a checkout; see `spikes/README.md`.
 - `?debug` in the viewer's address exposes the viewer as `window.__cs` for
   measurements in the browser console.
 
@@ -502,9 +547,13 @@ Without any slide at hand:
 - **"Session token missing or wrong"**: open the exact URL the server
   printed, including `#token=…`; the token changes at every restart unless
   `COMPASS_STUDIO_TOKEN` is set.
-- **"address already in use"**: another server is on that port; stop it or
-  use `--port`.
-- **A command is not found** (`compass-studio-…`): run `uv sync` in `server/`.
+- **"cannot listen on 127.0.0.1:8765 (Address already in use)"**: another
+  server is on that port; stop it or use `--port`.
+- **A command is not found** (`compass-studio…`): with the wheel, check
+  that `~/.local/bin` is on the `PATH` (`uv tool update-shell`); in a
+  checkout, run `uv sync` in `server/` and prefix commands with `uv run`.
+- **"no built client found; serving the API only"**: in a checkout, build
+  the client (`cd web && pnpm build`).
 - **The server refuses a label map** ("which image does it belong to?",
   or a size mismatch): name it after its slide or pass `--label-of`
   (section 5); it must be the same size as the slide.

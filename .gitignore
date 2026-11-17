@@ -1,6 +1,7 @@
 CLAUDE.md
 .claude/
 data/
+claude-resume
 
 # Python
 .venv/

@@ -1,9 +1,18 @@
-"""``compass-studio-serve``: serve images, annotation stores (and the built
-client) locally, implementing contract v1."""
+"""compass-studio: serve COMPASS slides, their label maps and annotation
+stores, with the browser client, on this machine (contract v1).
+
+    compass-studio SLIDE.zarr [MORE ...]   a slide and what lies next to it
+    compass-studio DIR                     every slide and store in DIR
+"""
 
 import argparse
 import os
 import secrets
+import socket
+import threading
+import time
+import webbrowser
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import uvicorn
@@ -24,19 +33,80 @@ def _kv(s: str) -> tuple[str, str]:
     return k, v
 
 
+def _id(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "_-." else "-" for ch in name)
+
+
 def find_stores(folder: Path) -> dict[str, Path]:
     """COMPASS annotation stores (``*.ann.sqlite``) directly in ``folder``,
     keyed by the file name without ``.ann.sqlite``."""
     out: dict[str, Path] = {}
     for p in sorted(folder.glob("*.ann.sqlite")):
         if p.is_file():
-            k = "".join(ch if ch.isalnum() or ch in "_-." else "-" for ch in p.name.removesuffix(".ann.sqlite"))
-            out[k] = p
+            out[_id(p.name.removesuffix(".ann.sqlite"))] = p
     return out
 
 
+def slide_files(slide: Path) -> tuple[dict[str, Path], dict[str, Path]]:
+    """A slide (``NAME.zarr``) and what belongs to it by name in its folder:
+    images and label maps ``NAME.*.zarr``, stores ``NAME.ann.sqlite`` and
+    ``NAME.*.ann.sqlite``. Returns (images, stores), keyed by id."""
+    name = slide.name.removesuffix(".zarr")
+    images = {_id(name): slide}
+    for p in sorted(slide.parent.iterdir()):
+        if p.is_dir() and p.name.startswith(name + ".") and p.suffix == ".zarr" and (p / "zarr.json").is_file():
+            images[_id(p.name.removesuffix(".zarr"))] = p
+    stores = {k: p for k, p in find_stores(slide.parent).items() if k == _id(name) or k.startswith(_id(name) + ".")}
+    return images, stores
+
+
+def bundled_web() -> Path | None:
+    """The built client: bundled in the wheel, else ``web/dist`` of a checkout."""
+    here = Path(__file__).resolve().parent
+    for d in (here / "web", here.parents[2] / "web" / "dist"):
+        if (d / "index.html").is_file():
+            return d
+    return None
+
+
+def _version() -> str:
+    try:
+        return version("compass-studio")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def port_busy(host: str, port: int) -> str | None:
+    """Why ``host:port`` cannot be listened on, or None (a clear message instead of uvicorn's traceback)."""
+    try:
+        with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET) as s:
+            s.bind((host, port))
+    except OSError as e:
+        return e.strerror or str(e)
+    return None
+
+
+def _open_when_up(host: str, port: int, url: str) -> None:
+    """Open the browser once the server accepts connections (at most 30 s)."""
+    def run() -> None:
+        for _ in range(300):
+            try:
+                with socket.create_connection((host, port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            return
+        webbrowser.open(url)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def main(argv: list[str] | None = None) -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", type=Path, nargs="*", metavar="PATH",
+                    help="a slide (NAME.zarr, served with NAME.*.zarr label maps and NAME*.ann.sqlite "
+                         "stores next to it), a folder (as --images), or an annotation store (.ann.sqlite)")
+    ap.add_argument("--version", action="version", version=f"CompassStudio {_version()}")
     ap.add_argument("--image", type=_kv, action="append", default=[], metavar="ID=PATH",
                     help="COMPASS .zarr folder to serve (repeatable)")
     ap.add_argument("--images", type=Path, action="append", default=[], metavar="DIR",
@@ -77,7 +147,9 @@ def main(argv: list[str] | None = None) -> None:
                     help="image reader: direct shard reader where supported (auto) or zarr-python")
     ap.add_argument("--tile-threads", type=int, default=None,
                     help="tile read/encode threads (default: available CPUs; 0 = Starlette's pool)")
-    ap.add_argument("--web", type=Path, help="built client directory to serve at /")
+    ap.add_argument("--web", type=Path, help="built client directory to serve at / (default: the bundled client)")
+    ap.add_argument("--no-web", action="store_true", help="serve the API only")
+    ap.add_argument("--open", action="store_true", help="open the viewer in the default browser")
     ap.add_argument("--spike-files", type=Path,
                     help="serve this directory at /api/spike/files (spike inputs, not part of v1)")
     ap.add_argument("--spike-results", type=Path,
@@ -89,9 +161,40 @@ def main(argv: list[str] | None = None) -> None:
     if a.web is not None and not (a.web / "index.html").is_file():
         ap.error(f"--web {a.web}: no index.html; build the client first "
                  "(cd web && pnpm install && pnpm build)")
+    web = None if a.no_web else a.web or bundled_web()
+    if web is None and not a.no_web:
+        print("  note: no built client found (cd web && pnpm build); serving the API only", flush=True)
     paths = dict(a.image)
     found_stores: dict[str, str] = {}
-    for d in a.images:
+    seen = {Path(v).resolve() for v in paths.values()}
+
+    def add(kind: str, into: dict[str, str], k: str, p: Path) -> None:
+        if p.resolve() in seen:  # the same file reached twice (a slide and its folder)
+            return
+        if k in into:
+            ap.error(f"{kind} id {k!r} given twice; use --image ID=PATH or --annotations ID=PATH to rename one")
+        seen.add(p.resolve())
+        into[k] = str(p)
+
+    dirs = list(a.images)
+    for p in a.paths:
+        if p.is_dir() and p.suffix == ".zarr":
+            if not (p / "zarr.json").is_file():
+                ap.error(f"{p}: not a Zarr v3 image (no zarr.json)")
+            imgs, sts = slide_files(p)
+            for k, q in imgs.items():
+                add("image", paths, k, q)
+            for k, q in sts.items():
+                add("annotation store", found_stores, k, q)
+        elif p.is_dir():
+            dirs.append(p)
+        elif p.is_file() and p.name.endswith(".ann.sqlite"):
+            add("annotation store", found_stores, _id(p.name.removesuffix(".ann.sqlite")), p)
+        elif not p.exists():
+            ap.error(f"{p}: no such file or folder")
+        else:
+            ap.error(f"{p}: expected a .zarr slide, a folder or an .ann.sqlite store")
+    for d in dirs:
         if not d.is_dir():
             ap.error(f"--images {d}: not a directory")
         try:
@@ -102,13 +205,9 @@ def main(argv: list[str] | None = None) -> None:
         if not found and not stores_found:
             ap.error(f"--images {d}: no .zarr images")
         for k, v in stores_found.items():
-            if k in found_stores:
-                ap.error(f"annotation store id {k!r} given twice")
-            found_stores[k] = str(v)
+            add("annotation store", found_stores, k, v)
         for k, v in found.items():
-            if k in paths:
-                ap.error(f"image id {k!r} given twice; use --image ID=PATH to rename one")
-            paths[k] = str(v)
+            add("image", paths, k, v)
     for k, v in a.labels:
         if k in paths:
             ap.error(f"id {k!r} given twice")
@@ -199,15 +298,20 @@ def main(argv: list[str] | None = None) -> None:
             # guessed (no name match): served, but not shown on any image
             print(f"  note: {e}; not shown on an image", flush=True)
     if not images and not datasets and a.spike_files is None:
-        ap.error("nothing to serve: give --image, --images, --synthetic, --annotations or --spike-files")
+        ap.error("nothing to serve: give a slide (.zarr), a folder, or --image, --synthetic, --annotations")
+    busy = port_busy(a.host, a.port)
+    if busy:
+        ap.error(f"cannot listen on {a.host}:{a.port} ({busy}); another server may be running: "
+                 "choose another port with --port")
 
     token = os.environ.get("COMPASS_STUDIO_TOKEN") or secrets.token_urlsafe(24)
     hosts = {f"{a.host}:{a.port}", f"localhost:{a.port}"}
     origins = {f"http://{h}" for h in hosts} | set(a.allow_origin)
-    app = create_app(images, token, hosts, origins, a.spike_results, a.web, a.spike_files,
+    app = create_app(images, token, hosts, origins, a.spike_results, web, a.spike_files,
                      a.tile_threads, datasets)
 
-    print(f"CompassStudio on http://{a.host}:{a.port}/#token={token}", flush=True)
+    url = f"http://{a.host}:{a.port}/#token={token}"
+    print(f"CompassStudio {_version()} on {url}" + ("" if web else " (API only)"), flush=True)
     for k, p in images.items():
         what = (f"labels {k} ({p.dtype}, on {p.aligned_to}, "
                 f"{len(p.classes) if p.classes else 'no'} classes)" if p.role == "labels"
@@ -218,4 +322,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  annotations {k}" + (f" (on {ds.aligned_to})" if ds.aligned_to else "")
               + f": {len(ds.store.layers)} layers"
               + (f", sidecar {ds.sidecar.path}" if ds.sidecar else ", read-only"), flush=True)
+    if a.open and web:
+        _open_when_up(a.host, a.port, url)
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")

@@ -28,7 +28,7 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
 Full usage, all commands and options: `docs/user-guide.md`.
 
     pnpm install && pnpm build
-    cd ../server && uv run compass-studio-serve --images <folder of .zarr images> --web ../web/dist
+    cd ../server && uv run compass-studio <slide.zarr or folder>    # serves web/dist
 
 Open the printed URL (it carries the session token in the `#token=`
 fragment). Keys, options, label maps, annotation stores and test data are

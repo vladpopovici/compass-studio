@@ -1,7 +1,9 @@
 [project]
-name = "compass-studio-server"
-version = "0.0.1"
-description = "Local server for CompassStudio: tiles and annotation queries over COMPASS stores"
+name = "compass-studio"
+version = "0.1.0"
+description = "Browser-based viewer and editor for COMPASS whole-slide images and annotations (local server with the built client)"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "Vlad Popovici", email = "popovici@bioxlab.org"}]
 requires-python = ">=3.12"
 dependencies = [
@@ -18,6 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
+compass-studio = "compass_studio.serve:main"
 compass-studio-synth = "compass_studio.synth.cli:main"
 compass-studio-synth-labels = "compass_studio.synth.labelmap:main"
 compass-studio-synth-channels = "compass_studio.synth.channels:main"
@@ -37,6 +40,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/compass_studio"]
+
+# bundles the built client as compass_studio/web (hatch_build.py)
+[tool.hatch.build.targets.wheel.hooks.custom]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "../contract/conformance"]
