@@ -216,6 +216,15 @@ def test_scenario(api):
     log = a.get(f"/stores/{sid}/log?since={rev}").json()["entries"]
     a.post(f"/stores/{sid}/commit", json={"base_revision": log[-1]["revision"], "ops": log[-1]["inverse"]})
     a.get(f"/stores/{sid}/log?limit=0")  # 400
+    # save points (1.6.0)
+    assert a.get(f"/layers/{new['id']}").json()["unsaved"] > 0
+    assert a.post(f"/layers/{new['id']}/save").json()["unsaved"] == 0
+    a.post(f"/stores/{sid}/commit", json={"base_revision": a.get(f"/stores/{sid}/revision").json()["revision"],
+                                          "ops": [{"op": "delete", "object_id": oid}]})
+    d = a.post(f"/layers/{new['id']}/discard", json={"client": "conformance"}).json()
+    assert len(d["reverted"]) == 1 and a.get(f"/layers/{new['id']}").json()["unsaved"] == 0
+    a.post(f"/layers/{cells['id']}/save")  # 400: store layers have no save point
+    a.post(f"/layers/{cells['id']}/discard")  # 400
     a.get(f"/layers/{new['id']}/features?ids={oid}")
     check_arrow(a.get(f"/layers/{new['id']}/points"), "point-layer")
     a.get("/info", headers={"Authorization": "Bearer wrong"})  # 401

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: CompassStudio
-  version: 1.5.0
+  version: 1.6.0
   summary: Contract between the CompassStudio server and its browser client.
   description: |
     Frozen 2026-11-13 (decision log D2). Under `/api/v1` only backward-compatible
@@ -21,6 +21,9 @@ info:
     at any level) or `max_area` (centroids at any level), filters on the
     bounding-box area, for level of detail by on-screen size; capability
     `tiles.area`. `ObjectInfo.area` and `ObjectInfo.length`.
+    1.6.0 (2026-11-16, additive): save points of editable layers:
+    `Layer.saved_revision` and `Layer.unsaved`, `POST /layers/{id}/save`,
+    `POST /layers/{id}/discard`; capability `save`.
 
     Conventions:
     - Coordinates are level-0 pixels of the image; microns via `mpp`.
@@ -347,7 +350,10 @@ paths:
     post:
       tags: [editing]
       summary: Copy a read-only store layer into the sidecar as an editable layer
-      description: Advances the store revision. Can take seconds for large layers.
+      description: |
+        Advances the store revision. Can take seconds for large layers.
+        Forked objects keep their ids, so a layer can be forked once; a
+        second fork, or a name already used in the sidecar, is a 422.
       operationId: forkLayer
       requestBody:
         required: false
@@ -363,6 +369,66 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Layer" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Invalid" }
+
+  /layers/{layer_id}/save:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+    post:
+      tags: [editing]
+      summary: Make an editable layer's current state its save point
+      description: Since 1.6.0. Advances the store revision (logged with an empty inverse).
+      operationId: saveLayer
+      responses:
+        "200":
+          description: The layer, with `unsaved` 0
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Layer" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /layers/{layer_id}/discard:
+    parameters:
+      - $ref: "#/components/parameters/LayerId"
+    post:
+      tags: [editing]
+      summary: Revert an editable layer to its save point
+      description: |
+        Since 1.6.0. Commits, in one batch, the inverses of the layer's
+        operations after its save point (newest first), and makes the result
+        the save point. The batch is logged like any commit, so committing
+        its logged `inverse` brings the edits back.
+      operationId: discardLayer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client:
+                  type: [string, "null"]
+                  description: Client label for the logged batch; `{reverted}` in it is replaced by the reverted revisions, newest first, comma-separated.
+      responses:
+        "200":
+          description: Reverted (or nothing to revert)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [layer_id, revision, reverted]
+                properties:
+                  layer_id: { type: string }
+                  revision: { type: integer, minimum: 0 }
+                  reverted:
+                    description: Revisions whose changes to the layer were reverted, oldest first.
+                    type: array
+                    items: { type: integer }
         "400": { $ref: "#/components/responses/BadRequest" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -616,7 +682,7 @@ components:
             Feature flags. v1: images, tiles.jpg, tiles.png, tiles.webp,
             annotations, events, edit (present when at least one store has a
             sidecar); labels and tiles.bin since 1.2.0; lines since 1.4.0;
-            tiles.area since 1.5.0.
+            tiles.area since 1.5.0; save since 1.6.0.
             Clients ignore unknown values.
           type: array
           items: { type: string }
@@ -735,6 +801,14 @@ components:
           minimum: 0
           description: Highest tile level returning polygons; centroids above.
         revision: { type: integer, minimum: 0 }
+        saved_revision:
+          description: Editable layers, since 1.6.0. Store revision of the layer's save point (its creation or fork, or the last save).
+          type: integer
+          minimum: 0
+        unsaved:
+          description: Editable layers, since 1.6.0. Number of committed batches that changed the layer after its save point.
+          type: integer
+          minimum: 0
 
     Geometry:
       description: GeoJSON geometry in level-0 px. Edits accept Point, LineString, Polygon.

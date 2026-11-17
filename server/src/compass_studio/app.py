@@ -40,13 +40,13 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from starlette.concurrency import run_in_threadpool
 
-from .annot.sidecar import Conflict, Sidecar
+from .annot.sidecar import Conflict, Sidecar, saved_revision, unsaved_entries
 from .annot.store import (CENTROID_TILE_VERSION, ID_LIMIT, LINE_LAYER_VERSION, POINT_LAYER_VERSION,
                           POLYGON_TILE_VERSION, AnnotationStore, centroid_tile, encode_ipc, line_layer,
                           point_layer, polygon_tile)
 from .imaging.pyramid import Pyramid
 
-API_VERSION = "1.5.0"
+API_VERSION = "1.6.0"
 TILE = 512
 POLYGON_MAX_LEVEL = 3  # S4: polygons up to level 3, centroids above
 ARROW = "application/vnd.apache.arrow.stream"
@@ -171,7 +171,7 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
     def info():
         caps = ["images", "tiles.jpg", "tiles.png", "tiles.webp", "labels", "tiles.bin", "annotations", "lines", "tiles.area", "events"]
         if any(d.sidecar for d in datasets.values()):
-            caps.append("edit")
+            caps += ["edit", "save"]
         return {"api_version": API_VERSION, "capabilities": caps,
                 "schemas": {"point-layer": [POINT_LAYER_VERSION], "polygon-tile": [POLYGON_TILE_VERSION],
                             "centroid-tile": [CENTROID_TILE_VERSION], "line-layer": [LINE_LAYER_VERSION]}}
@@ -266,7 +266,9 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
                 "name": view.layers[lid], "editable": editable, "forked_from": forked,
                 "groups": [{"id": g.id, "name": g.name, "index": g.index} for g in view.groups[lid]],
                 "counts": view.counts(lid), "polygon_max_level": POLYGON_MAX_LEVEL,
-                "revision": ds.revision() if editable else 0}
+                "revision": ds.revision() if editable else 0,
+                **({"saved_revision": saved_revision(view._conn, lid),
+                    "unsaved": len(unsaved_entries(view._conn, lid))} if editable else {})}
 
     @app.get("/api/v1/stores")
     def list_stores():
@@ -440,7 +442,10 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         if not isinstance(name, str) or not name or not isinstance(groups, list) or \
                 not all(isinstance(g, str) and g for g in groups) or len(set(groups)) != len(groups):
             return JSONResponse({"detail": "name and a list of distinct group names required"}, status_code=422)
-        lid, _ = await _edit(ds, lambda: ds.sidecar.create_layer(name, groups))
+        try:
+            lid, _ = await _edit(ds, lambda: ds.sidecar.create_layer(name, groups))
+        except sqlite3.IntegrityError:
+            return JSONResponse({"detail": f"a layer named {name!r} exists"}, status_code=422)
         ds.view.sync()
         return _layer_info(ds, ds.view, lid, True)
 
@@ -455,9 +460,38 @@ def create_app(images: dict[str, Pyramid], token: str, allowed_hosts: set[str],
         name = body.get("name")
         if name is not None and (not isinstance(name, str) or not name):
             return JSONResponse({"detail": "name must be a non-empty string"}, status_code=422)
-        new = await _edit(ds, lambda: ds.sidecar.fork_layer(ds.store.path, lid, name))
+        try:
+            new = await _edit(ds, lambda: ds.sidecar.fork_layer(ds.store.path, lid, name))
+        except ValueError as e:
+            return JSONResponse({"detail": str(e)}, status_code=422)
         ds.view.sync()
         return _layer_info(ds, ds.view, new, True)
+
+    def _editable_layer_id(layer_id: str) -> tuple[Dataset, int]:
+        ds, view, lid, editable = _resolve(layer_id)
+        if not editable:
+            raise HTTPException(400, "only editable layers have save points")
+        if ds.sidecar is None:
+            raise HTTPException(403, "store is not editable")
+        return ds, lid
+
+    @app.post("/api/v1/layers/{layer_id}/save")
+    async def save_layer(layer_id: str):
+        ds, lid = _editable_layer_id(layer_id)
+        await _edit(ds, lambda: ds.sidecar.save_layer(lid))
+        ds.view.sync()
+        return _layer_info(ds, ds.view, lid, True)
+
+    @app.post("/api/v1/layers/{layer_id}/discard")
+    async def discard_layer(layer_id: str, request: Request):
+        ds, lid = _editable_layer_id(layer_id)
+        body = await _json(request, allow_empty=True)
+        try:
+            c, reverted = await _edit(ds, lambda: ds.sidecar.discard_layer(lid, client=body.get("client")))
+        except (KeyError, ValueError, TypeError) as e:
+            return JSONResponse({"detail": f"cannot discard: {e}"}, status_code=422)
+        ds.view.sync()
+        return {"layer_id": layer_id, "revision": c.revision if c else ds.revision(), "reverted": reverted}
 
     # -- events -----------------------------------------------------------
 

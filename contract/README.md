@@ -2,13 +2,14 @@
 
 The HTTP contract between the CompassStudio server and client (decision D2).
 **Frozen 2026-11-13** after spikes S1 to S6.
-Current: 1.5.0. 1.1.0 added image name, objective power and version, and
+Current: 1.6.0. 1.1.0 added image name, objective power and version, and
 cacheable image tiles (`v`, `ETag`, 304); 1.2.0 added label maps (images
 with `role: labels`, raw `bin` tiles, class tables); 1.3.0 added
 `Store.aligned_to`, the image a store annotates; 1.4.0 added whole-layer
 polylines (`GET /layers/{id}/lines`, `line-layer` v1); 1.5.0 added
 size filters on polygon tiles (`min_area`, `max_area`) and object area and
-length.
+length; 1.6.0 added save points of editable layers (`save`, `discard`,
+`Layer.unsaved`).
 
 - `openapi.yaml`: the JSON API, OpenAPI 3.1, served under `/api/v1`.
 - `schemas/`: binary payloads (Arrow IPC), versioned separately:

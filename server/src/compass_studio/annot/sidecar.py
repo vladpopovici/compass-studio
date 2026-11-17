@@ -58,6 +58,15 @@ CREATE TABLE IF NOT EXISTS cs_forks (
 );
 """
 
+# save points (milestone 7): edits of a layer after its save point are "unsaved";
+# added to existing sidecars on open (additive)
+SAVES_DDL = """
+CREATE TABLE IF NOT EXISTS cs_saves (
+  layer_id INTEGER PRIMARY KEY REFERENCES layers(layer_id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL
+);
+"""
+
 
 
 class Conflict(Exception):
@@ -95,6 +104,45 @@ def _geojson(wkb: bytes) -> dict:
     return shapely.geometry.mapping(shapely.from_wkb(wkb))
 
 
+def saved_revision(conn: sqlite3.Connection, layer_id: int) -> int:
+    """Revision of a sidecar layer's save point (0: none recorded)."""
+    try:
+        row = conn.execute("SELECT revision FROM cs_saves WHERE layer_id = ?", (layer_id,)).fetchone()
+    except sqlite3.OperationalError:  # no cs_saves yet
+        return 0
+    return row[0] if row else 0
+
+
+def _op_layer(conn: sqlite3.Connection, op: dict) -> int | None:
+    """Layer an operation acts on (None: unknown, e.g. an object deleted since)."""
+    gid = op.get("group_id")
+    if gid is None and op.get("object_id") is not None:
+        row = conn.execute("SELECT MIN(group_id) FROM object_groups WHERE object_id = ?", (op["object_id"],)).fetchone()
+        gid = row[0] if row else None
+    if gid is None:
+        return None
+    row = conn.execute("SELECT layer_id FROM groups WHERE group_id = ?", (gid,)).fetchone()
+    return row[0] if row else None
+
+
+def unsaved_entries(conn: sqlite3.Connection, layer_id: int) -> list[tuple[int, list[dict]]]:
+    """(revision, inverse ops on this layer) of the batches after the layer's save
+    point that changed it, oldest first. An op counts for the layer when it or its
+    inverse names one of the layer's groups or objects."""
+    out = []
+    for rev, ops, inv in conn.execute("SELECT revision, ops, inverse FROM cs_oplog WHERE revision > ? "
+                                      "ORDER BY revision", (saved_revision(conn, layer_id),)):
+        ops, inv = json.loads(ops), json.loads(inv)
+        if not inv:
+            continue  # structural (fork_layer, create_layer, save_layer)
+        n = len(ops)
+        mine = [inv[n - 1 - i] for i, op in enumerate(ops)
+                if layer_id in (_op_layer(conn, op), _op_layer(conn, inv[n - 1 - i]))]
+        if mine:
+            out.append((rev, mine[::-1]))  # inverse order, as logged
+    return out
+
+
 class Sidecar:
     def __init__(self, path: str | Path, source: str | Path | None = None,
                  synchronous: str = "NORMAL", busy_timeout_ms: int = 5000):
@@ -118,6 +166,7 @@ class Sidecar:
         v = c.execute("SELECT value FROM meta WHERE key = 'cs_sidecar_version'").fetchone()
         if v is None or v[0] != SIDECAR_VERSION:
             raise ValueError(f"not a version {SIDECAR_VERSION} sidecar: {path}")
+        c.executescript(SAVES_DDL)
         if source is not None:
             src = str(Path(source).resolve())
             have = c.execute("SELECT value FROM meta WHERE key = 'cs_source'").fetchone()
@@ -153,6 +202,13 @@ class Sidecar:
         try:
             c.execute("BEGIN IMMEDIATE")
             src_name, = c.execute("SELECT name FROM src.layers WHERE layer_id = ?", (layer_id,)).fetchone()
+            # forked objects keep their ids, so a layer can be forked once
+            done = c.execute("SELECT f.layer_id, l.name FROM cs_forks f JOIN layers l ON l.layer_id = f.layer_id "
+                             "WHERE f.source_layer_id = ?", (layer_id,)).fetchone()
+            if done is not None:
+                raise ValueError(f"layer {layer_id} is already forked as {done[1]!r}")
+            if c.execute("SELECT 1 FROM layers WHERE name = ?", (name or f"{src_name} (fork)",)).fetchone():
+                raise ValueError(f"a layer named {name or src_name + ' (fork)'!r} exists")
             src_version = c.execute("SELECT value FROM src.meta WHERE key = 'schema_version'").fetchone()
             new_lid = self._alloc("layers", "layer_id", "last_layer_id", 1)
             c.execute("INSERT INTO layers(layer_id, name) VALUES (?, ?)",
@@ -183,7 +239,8 @@ class Sidecar:
                       (new_lid, str(source), layer_id, src_version[0] if src_version else None, time.time()))
             c.execute("DROP TABLE temp.gmap")
             c.execute("DROP TABLE temp.ids")
-            self._bump([{"op": "fork_layer", "source_layer_id": layer_id, "layer_id": new_lid}], [], None)
+            rev = self._bump([{"op": "fork_layer", "source_layer_id": layer_id, "layer_id": new_lid}], [], None)
+            c.execute("INSERT OR REPLACE INTO cs_saves(layer_id, revision) VALUES (?, ?)", (new_lid, rev))
             c.execute("COMMIT")
         except BaseException:
             if c.in_transaction:
@@ -203,7 +260,8 @@ class Sidecar:
             g0 = self._alloc("groups", "group_id", "last_group_id", len(groups))
             c.executemany("INSERT INTO groups(group_id, layer_id, name) VALUES (?, ?, ?)",
                           [(g0 + i, lid, n) for i, n in enumerate(groups)])
-            self._bump([{"op": "create_layer", "layer_id": lid, "name": name, "groups": groups}], [], None)
+            rev = self._bump([{"op": "create_layer", "layer_id": lid, "name": name, "groups": groups}], [], None)
+            c.execute("INSERT OR REPLACE INTO cs_saves(layer_id, revision) VALUES (?, ?)", (lid, rev))
             c.execute("COMMIT")
         except BaseException:
             c.execute("ROLLBACK")
@@ -221,7 +279,8 @@ class Sidecar:
 
     # -- edits ---------------------------------------------------------------
 
-    def apply(self, base_revision: int, ops: list[dict[str, Any]], client: str | None = None) -> Committed:
+    def apply(self, base_revision: int, ops: list[dict[str, Any]], client: str | None = None,
+              save_layer: int | None = None) -> Committed:
         """Apply ``ops`` atomically if ``base_revision`` is current.
 
         Ops (contract v1): ``create`` {group_id, geometry, name?, values?},
@@ -241,6 +300,8 @@ class Sidecar:
             for op in ops:
                 inverse.append(self._apply_one(op, created))
             rev = self._bump(ops, inverse[::-1], client)
+            if save_layer is not None:
+                c.execute("INSERT OR REPLACE INTO cs_saves(layer_id, revision) VALUES (?, ?)", (save_layer, rev))
             c.execute("COMMIT")
             return Committed(rev, created)
         except BaseException:
@@ -256,6 +317,47 @@ class Sidecar:
         c.execute("INSERT INTO cs_oplog(revision, ts, client, ops, inverse) VALUES (?, ?, ?, ?, ?)",
                   (rev, time.time(), client, json.dumps(ops), json.dumps(inverse)))
         return rev
+
+    # -- save points --------------------------------------------------------
+
+    def saved_revision(self, layer_id: int) -> int:
+        return saved_revision(self._conn, layer_id)
+
+    def unsaved(self, layer_id: int) -> int:
+        """Number of batches that changed the layer since its save point."""
+        return len(unsaved_entries(self._conn, layer_id))
+
+    def save_layer(self, layer_id: int) -> int:
+        """Make the layer's current state its save point; returns the new revision."""
+        self._editable_layer(layer_id)
+        c = self._conn
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            rev = self._bump([{"op": "save_layer", "layer_id": layer_id}], [], None)
+            c.execute("INSERT OR REPLACE INTO cs_saves(layer_id, revision) VALUES (?, ?)", (layer_id, rev))
+            c.execute("COMMIT")
+        except BaseException:
+            c.execute("ROLLBACK")
+            raise
+        return rev
+
+    def discard_layer(self, layer_id: int, client: str | None = None) -> tuple[Committed | None, list[int]]:
+        """Revert the layer to its save point in one batch (undoable like any
+        other) and make that the save point. Returns the batch (None if there was
+        nothing to revert) and the revisions reverted."""
+        self._editable_layer(layer_id)
+        entries = unsaved_entries(self._conn, layer_id)
+        if not entries:
+            return None, []
+        ops = [op for _, inv in reversed(entries) for op in inv]
+        revs = [r for r, _ in entries]
+        if client is not None:  # "{reverted}" in the label names the revisions undone
+            client = client.replace("{reverted}", ",".join(str(r) for r in reversed(revs)))
+        return self.apply(self.revision(), ops, client=client, save_layer=layer_id), revs
+
+    def _editable_layer(self, layer_id: int) -> None:
+        if self._conn.execute("SELECT 1 FROM layers WHERE layer_id = ?", (layer_id,)).fetchone() is None:
+            raise KeyError(f"no layer {layer_id} in the sidecar")
 
     def log(self, since: int = 0, limit: int = 100) -> list[dict]:
         """Batches committed after revision ``since``, oldest first."""

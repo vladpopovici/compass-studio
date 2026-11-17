@@ -33,7 +33,7 @@ def test_security(client):
 
 def test_info(client):
     i = client.get("/api/v1/info").json()
-    assert i["api_version"] == "1.5.0" and "lines" in i["capabilities"] and "tiles.area" in i["capabilities"] and "edit" in i["capabilities"]
+    assert i["api_version"] == "1.6.0" and "lines" in i["capabilities"] and "tiles.area" in i["capabilities"] and "edit" in i["capabilities"]
     assert i["schemas"] == {"point-layer": ["1"], "polygon-tile": ["1"], "centroid-tile": ["1"],
                             "line-layer": ["1"]}
 
@@ -127,6 +127,59 @@ def test_layers_points_tiles(client):
     assert client.get("/api/v1/layers/synth:9").status_code == 404
     assert client.get("/api/v1/layers/nope").status_code == 404
     assert client.get("/api/v1/layers/synth:2/features?ids=x").status_code == 400
+
+
+def test_save_and_discard(client):
+    pt = lambda x: {"type": "Point", "coordinates": [x, 10.0]}
+    lay = client.post("/api/v1/stores/synth/layers", json={"name": "saves", "groups": ["a", "b"]}).json()
+    assert lay["unsaved"] == 0 and lay["saved_revision"] > 0
+    lid, g = lay["id"], lay["groups"]
+    rev = lambda: client.get("/api/v1/stores/synth/revision").json()["revision"]
+    c = client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": [
+        {"op": "create", "group_id": g[0]["id"], "geometry": pt(1)}]}).json()
+    a = c["created"][0]
+    r = client.post(f"/api/v1/layers/{lid}/save")
+    assert r.status_code == 200 and r.json()["unsaved"] == 0
+    # edits after the save point: one move, one new object, one delete of the saved one
+    client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": [
+        {"op": "move", "object_id": a, "group_id": g[1]["id"]}]})
+    b = client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": [
+        {"op": "create", "group_id": g[0]["id"], "geometry": pt(2)}]}).json()["created"][0]
+    client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": [{"op": "delete", "object_id": a}]})
+    # an edit of another layer is not counted
+    other = client.post("/api/v1/stores/synth/layers", json={"name": "other", "groups": ["x"]}).json()
+    client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": [
+        {"op": "create", "group_id": other["groups"][0]["id"], "geometry": pt(3)}]})
+    info = client.get(f"/api/v1/layers/{lid}").json()
+    assert info["unsaved"] == 3
+    r = client.post(f"/api/v1/layers/{lid}/discard", json={"client": "test:undo:{reverted}"})
+    assert r.status_code == 200 and len(r.json()["reverted"]) == 3
+    entry = client.get(f"/api/v1/stores/synth/log?since={r.json()['revision'] - 1}").json()["entries"][0]
+    assert entry["client"] == "test:undo:" + ",".join(map(str, reversed(r.json()["reverted"])))
+    info = client.get(f"/api/v1/layers/{lid}").json()
+    assert info["unsaved"] == 0 and info["counts"] == {"point": 1}
+    objs = client.get(f"/api/v1/layers/{lid}/objects?ids={a},{b}").json()["objects"]
+    assert [(o["object_id"], o["group"]) for o in objs] == [(a, 0)]
+    assert client.get(f"/api/v1/layers/{other['id']}").json()["counts"] == {"point": 1}
+    # the discard is a logged batch: undoing it brings the edits back
+    last = client.get(f"/api/v1/stores/synth/log?since={rev() - 1}").json()["entries"][0]
+    client.post("/api/v1/stores/synth/commit", json={"base_revision": rev(), "ops": last["inverse"]})
+    info = client.get(f"/api/v1/layers/{lid}").json()
+    assert info["unsaved"] == 1 and info["counts"] == {"point": 1}  # b back, a deleted again
+    assert client.post("/api/v1/layers/synth:2/save").status_code == 400
+
+
+def test_duplicate_layer_names(client):
+    r = client.post("/api/v1/stores/synth/layers", json={"name": "dup", "groups": ["a"]})
+    assert r.status_code == 201
+    r = client.post("/api/v1/stores/synth/layers", json={"name": "dup", "groups": ["a"]})
+    assert r.status_code == 422 and "exists" in r.json()["detail"]
+    r = client.post("/api/v1/layers/synth:3/fork", json={"name": "dup"})
+    assert r.status_code == 422 and "exists" in r.json()["detail"]
+    assert client.post("/api/v1/layers/synth:3/fork", json={"name": "regions copy"}).status_code == 201
+    # forked objects keep their ids: a layer is forked once
+    r = client.post("/api/v1/layers/synth:3/fork", json={"name": "regions copy 2"})
+    assert r.status_code == 422 and "already forked" in r.json()["detail"]
 
 
 def test_fork_edit_undo_conflict(client):
