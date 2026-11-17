@@ -58,6 +58,8 @@ Stop the server with Ctrl+C.
 | `--read-only` | no edit databases: annotations cannot be edited. |
 | `--synthetic ID=WxH` | a generated test image, e.g. `--synthetic big=200000x200000`. |
 | `--synthetic-labels ID=IMAGE` | a generated test label map the size of `IMAGE`. |
+| `--synthetic-channels ID=WxHxN` | a generated multichannel (uint16) test image with `N` channels, e.g. `--synthetic-channels mc=40000x30000x8`. |
+| `--channels ID=FILE` | channel display defaults (JSON) for a multichannel image; default `<image>.channels.json` next to it (section 4, Multichannel images). |
 
 ### Network and performance
 
@@ -93,7 +95,8 @@ width is remembered in this browser.
 - Drag: pan.
 - Wheel: zoom around the cursor.
 - Hover: the status bar shows the cursor position, the annotation object
-  under it (layer, group, id) and the label values under it.
+  under it (layer, group, id), the values of the shown channels
+  (multichannel images) and the label values under it.
 - Click a point, polygon or polyline: select it and show it in the
   inspector. Shift+click: add or remove one. Click on empty space: clear
   the selection. With a drawing tool, clicks draw instead (section 7).
@@ -133,8 +136,53 @@ Keys do nothing while a text field or list has focus.
 
 From left to right: cursor in level-0 px, cursor in microns, the pyramid
 level being shown (`L2/7`), microns per pixel, the annotation object under the
-cursor (`layer › group #id`), label values under the cursor, tile loading (tiles
-loaded, requests in flight, latency) and a scale bar.
+cursor (`layer › group #id`), the values of the shown channels and label values
+under the cursor, tile loading (tiles loaded, requests in flight, latency) and a
+scale bar.
+
+### Multichannel images
+
+Images that are not 8-bit colour (fluorescence, multiplex: uint8 or uint16,
+any number of channels, or 3 channels with names other than R, G, B) are
+shown channel by channel: each shown channel is drawn in its colour, from
+black at its minimum to full colour at its maximum, and the channels are
+added together over black, as on a fluorescence microscope. A single-channel
+integer image counts as a label map only when it pairs with a slide
+(section 5); otherwise it is shown as a one-channel image.
+
+The sidebar's **Channels** tab (opened by default when the slide has no
+annotation layers) lists every channel:
+
+- Checkbox: show or hide the channel. At most 8 channels are shown at once;
+  the other checkboxes are disabled until one is hidden.
+- Colour swatch: click to pick the channel's colour.
+- The window (minimum–maximum) on the right of the row.
+- For a shown channel: its histogram (log scale, over the values found;
+  the window shaded in the channel's colour), Min and Max sliders with
+  number fields (type a value and press Enter), and **Auto**: the window
+  from the histogram, 1st to 99.9th percentile.
+- **Auto all**: Auto for every channel. **None**: hide every channel.
+  **Reset**: back to the defaults (below), forgetting this browser's changes.
+
+When a slide is first opened, the first four channels are shown, a channel
+whose name contains DAPI, Hoechst or nuclear is blue and the others take
+green, red, magenta, cyan, yellow, orange and white in turn, and every
+window is Auto. Your changes are remembered per image in this browser.
+Defaults can also come from a JSON file next to the image
+(`slide.zarr` → `slide.channels.json`, or `--channels ID=FILE`); every
+field but the name is optional, and channels can be given by `index`
+(0-based) instead of `name`:
+
+    {"channels": [
+      {"name": "DAPI", "color": "#0080ff", "min": 200, "max": 6000, "visible": true},
+      {"name": "CD8", "color": "#ff0000", "visible": true},
+      {"index": 5, "max": 1200}]}
+
+If any entry gives `visible`, exactly the channels marked visible are shown
+first. Colour and contrast changes apply at once without loading anything;
+showing a channel loads only that channel's tiles. Histograms are computed
+by the server from a coarse level (at most about one million pixels) the
+first time an image is opened.
 
 ### Keeping your place
 
@@ -144,7 +192,10 @@ sharing the link together with a valid token, returns to the same place.
 ## 5. Label maps
 
 A label map is a single-channel integer COMPASS pyramid (uint8, uint16,
-uint32 or int32) with the same size as its slide, one value per pixel.
+uint32 or int32) with the same size as its slide, one value per pixel. Such a
+pyramid is served as a label map when it is given with `--labels` or
+`--label-of`, or when its name pairs it with a slide (below); otherwise it is
+shown as a one-channel image (section 4, Multichannel images).
 
 ### Pairing with a slide
 
@@ -153,7 +204,7 @@ Applied in order:
 1. `--label-of MAP=IMAGE`.
 2. Name: `slide.zarr` gets `slide.tissue.zarr`, `slide.cells.zarr` and so
    on (the longest image id that is a dotted prefix of the map's id).
-3. If only one image is served, every map belongs to it.
+3. If only one image is served, every map given with `--labels` belongs to it.
 
 The map and the slide must have the same size, or the server refuses to start.
 
@@ -404,6 +455,18 @@ slide's size, its mpp and a name that pairs:
 start-up.) Run `uv run compass-studio-synth --help` for all options (image
 size, classes, polygon sizes and vertex counts, attributes, seed).
 
+A multichannel (uint16) image in the COMPASS layout: cells inside
+blob-shaped tissue, channel 0 nuclear (DAPI), the others markers in a
+share of the cells (nuclear, cytoplasmic or membranous). Coarser levels
+sample the pattern rather than averaging it, so the image looks speckled
+when zoomed out:
+
+    uv run compass-studio-synth-channels ../data/m8/mc8.zarr --size 16384x16384 --channels 8
+
+(about 1 minute and 2.4 GB for these settings). Without writing anything,
+`--synthetic-channels mc=40000x30000x8` serves the same pattern generated
+on the fly.
+
 Without any slide at hand:
 
     uv run compass-studio-serve --synthetic big=200000x200000 --synthetic-labels big.lab=big --web ../web/dist
@@ -420,7 +483,8 @@ Without any slide at hand:
   `--web ../web/dist` and at least two images; it also checks label maps,
   points, polygons and polylines when the first image has them: points
   with a layer of 1,000 points or more, polygons with 100 or more, such as
-  the store above):
+  the store above; and the Channels tab when a multichannel image is
+  served, with the 8-channel limit if one has more than 8 channels):
 
       uv run python ../web/e2e/smoke.py http://127.0.0.1:8765 TOKEN [--shots DIR] [--edit]
 
@@ -457,7 +521,12 @@ Without any slide at hand:
   without "on" pairs with nothing.
 - **A label map does not appear**: it shows only with the slide it is
   paired with (see the server's start-up lines); press `l` in case maps are
-  hidden.
+  hidden. A single-channel map that pairs with no slide is listed as an
+  image instead: name it after its slide or pass `--labels` or `--label-of`.
+- **"multichannel images must be one of ('uint8', 'uint16')"**: other sample
+  types (float, 32-bit) are not shown yet.
+- **A multichannel image is black**: the channels may be hidden (Channels
+  tab) or their windows too wide or narrow: press Auto all, or Reset.
 - **Panning lags or tiles arrive slowly**: check the machine's load first.
   The server and the browser both need CPU; a CPU quota on the user's
   cgroup or a heavy job in the same session slows both. Run batch jobs with

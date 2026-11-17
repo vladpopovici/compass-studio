@@ -12,6 +12,8 @@ import { DEFAULT_ANN_STYLE, type ObjectPick } from "@/viewer/annstyle";
 import { DRAW_TOOLS, editorLayer, type Tool } from "@/viewer/edits";
 import type { View, Viewer } from "@/viewer/viewer";
 import { useAnnotations, useObjects } from "./annotations";
+import { ChannelPanel } from "./ChannelPanel";
+import { useChannels } from "./channels";
 import { Busy, DiscardDialog, EditBar, ForkDialog, NewLayerDialog, Toast, TOOLS, WorkChip } from "./EditBar";
 import { useEditing } from "./editing";
 import { Inspector, objectKey } from "./Inspector";
@@ -74,6 +76,7 @@ export function App() {
   const all = useMemo(() => (load.state === "ready" ? load.images : []), [load]);
   const images = useMemo(() => all.filter((i) => i.role !== "labels"), [all]);
   const image = images.find((i) => i.id === imageId) ?? null;
+  const multi = image?.display === "channels" ? image : null;
   const labelInfos = useMemo(() => all.filter((i) => i.role === "labels" && i.aligned_to === imageId), [all, imageId]);
   const maps: LabelMapState[] = labelInfos.map((info) => ({
     info, style: styles[info.id] ?? DEFAULT_STYLE, values: values[info.id] ?? [],
@@ -85,6 +88,11 @@ export function App() {
     const keep = image && r.image === image.id;
     viewer.setImage(image, keep ? { x: r.x, y: r.y, zoom: r.zoom } : undefined);
   }, [viewer, image]);
+
+  const ch = useChannels(image);
+  useEffect(() => {
+    viewer?.setChannels(ch.settings);
+  }, [viewer, ch.settings]);
 
   useEffect(() => {
     if (!viewer) return;
@@ -200,13 +208,14 @@ export function App() {
 
   const hoverLabels = useMemo(() => {
     if (!viewer || !cursor) return "";
-    return viewer.labelsAt(cursor[0], cursor[1]).map(({ info, value }) => {
+    const channels = image ? viewer.channelsAt(cursor[0], cursor[1]).map(({ channel, value }) => `${image.channels[channel]} ${value}`) : [];
+    return [...channels, ...viewer.labelsAt(cursor[0], cursor[1]).map(({ info, value }) => {
       if (value === info.background) return "";
       const c = ((info.classes ?? []) as LabelClass[]).find((x) => x.value === value);
       return `${info.name ?? info.id}: ${value}${c ? ` ${c.name}` : ""}`;
-    }).filter(Boolean).join("  ");
-    // styles: visibility changes what is under the cursor
-  }, [viewer, cursor, styles]); // eslint-disable-line react-hooks/exhaustive-deps
+    })].filter(Boolean).join("  ");
+    // styles and channel settings: visibility changes what is under the cursor
+  }, [viewer, cursor, styles, ch.settings, image]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // URL follows the view, at most every 300 ms
   useEffect(() => {
@@ -302,11 +311,14 @@ export function App() {
         <div className="flex min-h-0 flex-1">
           {left && (
             <Sidebar side="left" label="Sidebar">
-              <Tabs value={tab ?? (ann.layers.length || !maps.length ? "layers" : "labels")} onValueChange={setTab}
+              <Tabs value={tab && (tab !== "channels" || multi) ? tab
+                             : multi && !ann.layers.length ? "channels" : ann.layers.length || !maps.length ? "layers" : "labels"}
+                    onValueChange={setTab}
                     className="flex min-h-0 flex-1 flex-col">
                 <TabsList>
                   <TabsTrigger value="layers">Layers <span className="text-muted-foreground">{ann.layers.length}</span></TabsTrigger>
                   <TabsTrigger value="labels">Labels <span className="text-muted-foreground">{maps.length}</span></TabsTrigger>
+                  {multi && <TabsTrigger value="channels">Channels <span className="text-muted-foreground">{multi.channels.length}</span></TabsTrigger>}
                 </TabsList>
                 <TabsContent value="layers">
                   {ann.error && <p className="p-2 text-red-400">{ann.error}</p>}
@@ -315,6 +327,7 @@ export function App() {
                                edit={canEdit ? { onSave: (id) => void edit.saveLayer(id), onDiscard: (id) => setDiscardAsk(id) } : undefined} />
                 </TabsContent>
                 <TabsContent value="labels"><LabelPanel maps={maps} onChange={setStyle} /></TabsContent>
+                {multi && <TabsContent value="channels"><ChannelPanel info={multi} ch={ch} /></TabsContent>}
               </Tabs>
             </Sidebar>
           )}

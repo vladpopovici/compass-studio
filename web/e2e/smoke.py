@@ -12,7 +12,10 @@ and the inspector's attributes, Shift+click, Esc, and group toggles. If it
 has a polygon layer with at least 100 polygons: shapes zoomed in (hover,
 click, inspector, outline and fill controls, the outline's closing edge,
 the working layer: lock, chip, `g`, drawing order, dimming and picking)
-and centres zoomed out; with a polyline layer, its line width control.
+and centres zoomed out; with a polyline layer, its line width control. With
+a multichannel image: the Channels tab, one layer and one request stream
+per shown channel, contrast without refetching, values under the cursor,
+Auto, the 8-channel limit (if an image has more than 8), memory and Reset.
 
 With ``--edit`` (start the server with ``--sidecar-dir`` pointing at a
 scratch directory: the test writes to the curation databases), editing on
@@ -334,6 +337,97 @@ async def check_working_layer(ff, check, shots, layer):
     if await ff.eval("!!document.querySelector('aside[aria-label=Inspector]')"):
         await ff.key("]")
     await click_buttons(ff, "None", but=layer)
+    await asyncio.sleep(0.3)
+
+
+CH_LAYERS = """((id) => window.__cs.viewer.deck.props.layers.map(l => l.id)
+  .filter(i => i.startsWith(`channels-${id}-`) && !i.endsWith('-backdrop')).map(i => +i.split('-').pop()))"""
+CH_REQUESTS = """(performance.getEntriesByType('resource').map(e => e.name).filter(n => n.includes('.bin?channel=')))"""
+CH_PANEL = "document.querySelector('[role=tabpanel][data-state=active]')"
+
+
+async def check_channels(ff, check, shots, base, token, mc):
+    """Multichannel images (milestone 8): the Channels tab, per-channel layers and requests,
+    contrast without refetching, values under the cursor, the 8-channel limit, memory, Reset."""
+    info = mc
+    n = len(info["channels"])
+    await ff.eval(f"localStorage.removeItem('cs.channels.{info['id']}'), 1")
+    await ff.goto(f"{base}/?debug&image={info['id']}#token={token}")
+    await ff.wait_for(f"!!{CH_PANEL}?.querySelector('[data-channel]')", 60)
+    await ff.wait_for(TILES_IDLE, 60)
+    tab = await ff.eval("document.querySelector('[role=tab][data-state=active]')?.textContent ?? ''")
+    rows = await ff.eval(f"{CH_PANEL}.querySelectorAll('[data-channel]').length")
+    shown = json.loads(await ff.eval(f"JSON.stringify({CH_LAYERS}('{info['id']}'))"))
+    want = [c for c in range(n) if c < 4] if not info.get("channel_defaults") else None
+    check(tab.startswith("Channels") and rows == n, f"Channels tab lists the {n} channels ({tab!r})")
+    check(want is None or shown == want, f"one tile layer per shown channel: {shown}")
+    if shots:
+        await ff.screenshot(shots / "12-channels-fit.png")
+    await ff.key("1")
+    await asyncio.sleep(1)
+    await ff.wait_for(TILES_IDLE, 60)
+    await ff.mouse([{"type": "pointerMove", "x": 800, "y": 400}, {"type": "pointerMove", "x": 810, "y": 410}])
+    await asyncio.sleep(0.4)
+    hover = await ff.eval(HOVER)
+    check(info["channels"][shown[0]] in hover, f"values of the shown channels under the cursor: {hover!r}")
+    if shots:
+        await ff.screenshot(shots / "13-channels-1to1.png")
+    # turning a channel on fetches that channel only
+    off = next((c for c in range(n) if c not in shown), None)
+    if off is not None:
+        before = len(await ff.eval(CH_REQUESTS))
+        await ff.eval(f"{CH_PANEL}.querySelector('[data-channel=\"{off}\"] input[type=checkbox]').click(), 1")
+        await asyncio.sleep(0.5)
+        await ff.wait_for(TILES_IDLE, 60)
+        new = (await ff.eval(CH_REQUESTS))[before:]
+        check(new and all(f"channel={off}&" in u or u.endswith(f"channel={off}") for u in new),
+              f"turning channel {off} on fetches only that channel ({len(new)} requests)")
+    # contrast: the shader's window changes, nothing is fetched
+    c0 = shown[0]
+    before = len(await ff.eval(CH_REQUESTS))
+    await ff.eval(f"{SET_RANGE}({CH_PANEL}.querySelector('[data-channel=\"{c0}\"] input[aria-label$=\" max\"]'), 500)")
+    await asyncio.sleep(0.5)
+    lo_hi = json.loads(await ff.eval(f"""JSON.stringify(window.__cs.viewer.deck.layerManager.getLayers()
+      .filter(l => l.id.startsWith('channels-{info['id']}-{c0}-') && l.props.plane).map(l => l.props.hi))"""))
+    after = len(await ff.eval(CH_REQUESTS))
+    check(lo_hi and all(h == 500 for h in lo_hi) and after == before,
+          f"changing the contrast updates the tiles on the GPU without fetching ({len(lo_hi)} tiles, {after - before} requests)")
+    await ff.eval(f"[...{CH_PANEL}.querySelectorAll('[data-channel=\"{c0}\"] button')].find(b => b.textContent.includes('Auto')).click(), 1")
+    await asyncio.sleep(0.3)
+    span = await ff.eval(f"{CH_PANEL}.querySelector('[data-channel=\"{c0}\"] .font-mono').textContent")
+    check(not span.endswith("–500"), f"Auto restores the contrast from the histogram ({span})")
+    # remembered in this browser across a reload; Reset forgets it
+    await ff.eval(f"(() => {{ const el = {CH_PANEL}.querySelector('[data-channel=\"{c0}\"] input[type=color]');"
+                  " Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '#123456');"
+                  " el.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()")
+    await asyncio.sleep(0.3)
+    await ff.goto(f"{base}/?debug&image={info['id']}#token={token}")
+    await ff.wait_for(f"!!{CH_PANEL}?.querySelector('[data-channel]')", 60)
+    color = await ff.eval(f"{CH_PANEL}.querySelector('[data-channel=\"{c0}\"] input[type=color]').value")
+    check(color == "#123456", f"channel settings are remembered across a reload ({color})")
+    await ff.eval(f"[...{CH_PANEL}.querySelectorAll('button')].find(b => b.textContent === 'Reset').click(), 1")
+    await asyncio.sleep(0.3)
+    color = await ff.eval(f"{CH_PANEL}.querySelector('[data-channel=\"{c0}\"] input[type=color]').value")
+    check(color != "#123456", f"Reset goes back to the defaults ({color})")
+    await ff.wait_for(TILES_IDLE, 60)
+    s = json.loads(await ff.eval("JSON.stringify(window.__cs.viewer.stats.summary())"))
+    print(f"     channel tiles: {s['loaded']} loaded, to screen p50 {s['request_to_screen_ms'].get('p50')} "
+          f"p95 {s['request_to_screen_ms'].get('p95')} ms, server read p50 {s['server_read_ms'].get('p50')} ms")
+
+
+async def check_channel_limit(ff, check, base, token, mc):
+    """At most 8 channels at once: the other checkboxes are disabled."""
+    await ff.goto(f"{base}/?debug&image={mc['id']}#token={token}")
+    await ff.wait_for(f"!!{CH_PANEL}?.querySelector('[data-channel]')", 60)
+    for _ in range(len(mc["channels"])):  # click unchecked, enabled boxes until none is left
+        if not await ff.eval(f"(() => {{ const b = [...{CH_PANEL}.querySelectorAll('[data-channel] input[type=checkbox]')]"
+                             ".find(x => !x.checked && !x.disabled); if (b) b.click(); return !!b; })()"):
+            break
+        await asyncio.sleep(0.05)
+    on = await ff.eval(f"{CH_PANEL}.querySelectorAll('[data-channel] input[type=checkbox]:checked').length")
+    disabled = await ff.eval(f"{CH_PANEL}.querySelectorAll('[data-channel] input[type=checkbox]:disabled').length")
+    check(on == 8 and disabled == len(mc["channels"]) - 8, f"at most 8 channels at once ({on} on, {disabled} disabled)")
+    await ff.eval(f"[...{CH_PANEL}.querySelectorAll('button')].find(b => b.textContent === 'Reset').click(), 1")
     await asyncio.sleep(0.3)
 
 
@@ -771,6 +865,19 @@ async def main() -> int:
             check(v6["image"] != v5["image"], f"PageDown switches image ({v5['image']} -> {v6['image']})")
         else:
             print("SKIP image switching (one image served)")
+
+        imgs = await ff.eval("fetch('api/v1/images', {headers: {Authorization: 'Bearer " + a.token + "'}})"
+                             ".then(r => r.json()).then(j => JSON.stringify(j))")
+        multi = [i for i in json.loads(imgs) if i.get("display") == "channels"]
+        if multi:
+            await check_channels(ff, check, a.shots, a.base, a.token, multi[0])
+            big = next((i for i in multi if len(i["channels"]) > 8), None)
+            if big:
+                await check_channel_limit(ff, check, a.base, a.token, big)
+            else:
+                print("SKIP channel limit (no image with more than 8 channels)")
+        else:
+            print("SKIP channels (no multichannel image served)")
 
         if a.edit:
             if polys >= 100 and await ff.eval("(async () => (await (await fetch('api/v1/stores', {headers: {Authorization: 'Bearer "

@@ -2,7 +2,7 @@
 
 CompassStudio is a browser-based viewer and editor for COMPASS-format slides and annotations.
 
-Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 7 done (2026-11-16); next is milestone 8. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
+Status: spikes S1 to S6 done, contract v1 frozen and milestones 3 to 8 done (2026-11-17); next is milestone 9. First entry 2026-11-12. Name chosen 2026-11-12. License and several details are open (see section 8).
 
 This document records what was decided, why, and which alternatives were
 rejected, so that settled questions are not reopened without new evidence.
@@ -116,6 +116,10 @@ later because the client depends only on the contract (D2).
   the layer since), `POST /layers/{id}/save`, `POST /layers/{id}/discard`
   (the inverses since the save point in one logged batch; `{reverted}` in
   its client label names the revisions); capability `save`.
+  1.7.0 (2026-11-17, milestone 8, additive): multichannel images:
+  `Image.display` (`rgb` or `channels`), `Image.channel_defaults`; their
+  tiles are `bin` planes of one channel (`?channel=`); `GET
+  /images/{id}/histogram`; capability `channels`.
 
 ### D3. Image store access
 COMPASS images are Zarr v3 directory stores (`.zarr` folders), one array per
@@ -153,6 +157,35 @@ test fixtures must never copy them.
 - Tile work runs on a dedicated thread pool, one thread per CPU (S1: about
   15 % more throughput than Starlette's default pool).
 - Multichannel: raw per-channel tiles with shader-side channel mixing and LUTs.
+  Milestone 8 (2026-11-17), chosen by the owner from options: an image is
+  `rgb` when it is uint8 with 3 (or 4) channels named R, G, B (or unnamed),
+  else `channels` (uint8 or uint16; other types refused for now). One
+  channel per tile request (`bin`, gzip), so showing a channel fetches only
+  it and the browser caches each channel; COMPASS chunks hold every channel,
+  so the server keeps decoded tiles in a 256 MB cache and concurrent
+  requests for one tile wait for a single read. In the browser each shown
+  channel is a TileLayer (rg8-packed uint16, decoded in the shader) mapped
+  through its min/max window and colour and added over a black backdrop
+  (additive blending; refinement `no-overlap` so parent and child tiles
+  are never added twice); at most 8 shown at once. Contrast and colour are
+  uniforms (no refetch). Histograms (256 bins and percentiles per channel)
+  come from the finest level of at most 2^20 px, once per image version;
+  Auto is the 1st to 99.9th percentile. Defaults: an optional
+  `<image>.channels.json` (colour, min, max, visible by name or index);
+  changes are remembered per image in the browser (localStorage).
+  Rejected: all shown channels in one request (any toggle refetches every
+  channel), all channels always (a 40-channel uint16 tile is about 20 MB),
+  a minimal panel without histogram or Auto, browser-only settings, and a
+  shared settings file written by the viewer. A single-channel integer
+  pyramid is a label map only when paired (`--labels`, `--label-of` or a
+  dotted name); otherwise a one-channel image (it used to be a label map
+  always). Measured (workstation, headless Firefox, 4 server CPUs,
+  synthetic 8- and 40-channel uint16 images, 4 channels shown): channel
+  tiles to screen p50 46 to 59 ms, p95 79 to 80 ms in the end-to-end test
+  (the first opening of a slide up to 150 ms p95); server read of a
+  40-channel tile 15 ms p50 for the first channel, the others from the
+  cache. Not measured: the laptop, Chromium, frame rate with 8 channels
+  while panning, real multiplex slides (synthetic data only, by choice).
 - Rejected as default: client-side Zarr decoding (needs browser Blosc-bitshuffle
   support **[verify]** and reimplementation of the shard layer).
 
@@ -480,7 +513,7 @@ baseline (D5).
 6. Polygons with level of detail. Done 2026-11-15 (polylines included).
 7. Editing: selection and check-out, draw tools, vertex editing, attribute forms,
    undo and redo, commits with revisions. Done 2026-11-16.
-8. Multichannel.
+8. Multichannel. Done 2026-11-17 (synthetic data only).
 9. Packaging (one command to serve a slide) and documentation.
 
 ## 8. Open items

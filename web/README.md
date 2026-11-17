@@ -11,9 +11,11 @@ TypeScript, Vite, pnpm, React, Tailwind with shadcn/ui components, deck.gl
   maps (milestone 4), inspector for selected objects, status bar with
   coordinates, level, object and label under the cursor and scale bar;
   editing (milestone 7: `editing.ts` commits, sync from the log, undo and
-  forks; `EditBar.tsx` tools and dialogs).
+  forks; `EditBar.tsx` tools and dialogs); multichannel images (milestone
+  8: `channels.ts` settings, `ChannelPanel.tsx`).
 - `src/viewer/`: the framework-free viewer core (deck.gl `Deck`,
-  OrthographicView, image tiles, label maps; annotation sources for points,
+  OrthographicView, image tiles, label maps, `channels.ts` multichannel
+  layers; annotation sources for points,
   polygons with level of detail and polylines, sharing `annstyle.ts`;
   `edits.ts` overlay and editor layer, `geometry.ts` checks and clean-up).
   The application and the benches use it.

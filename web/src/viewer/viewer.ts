@@ -5,6 +5,7 @@
 import { Deck, LinearInterpolator, OrthographicView, type OrthographicViewState } from "@deck.gl/core";
 import type { ImageInfo } from "../api";
 import type { Layer } from "@deck.gl/core";
+import { ChannelSource, type ChannelSetting } from "./channels";
 import { LabelSource, type LabelStyle } from "./labels";
 import {
   ASSUMED_MPP, bandAt, selectionLayers, type AnnSource, type AnnStyle, type BandId, type ObjectPick,
@@ -51,6 +52,9 @@ export class Viewer {
   private size: [number, number] = [1, 1];
   private resize: ResizeObserver;
   private imageLayer: Layer | null = null;
+  /** multichannel images: the channels and how they are shown */
+  private channels: ChannelSource | null = null;
+  private channelSettings: ChannelSetting[] = [];
   private labels = new Map<string, { source: LabelSource; style: LabelStyle }>();
   private annotations: { source: AnnSource; style: AnnStyle }[] = [];
   private selection: ObjectPick[] = [];
@@ -99,7 +103,11 @@ export class Viewer {
   /** Show an image; `view` restores a position (else fit). */
   setImage(info: ImageInfo | null, view?: Partial<Pick<View, "x" | "y" | "zoom">>) {
     this.info = info;
-    this.imageLayer = info ? makeTileLayer(info, this.stats, "", this.opts.tiles ?? TILE_PRESETS.tuned) : null;
+    this.channels?.destroy();
+    const multi = info?.display === "channels";
+    this.channels = info && multi ? new ChannelSource(info, this.stats, this.opts.tiles ?? TILE_PRESETS.tuned) : null;
+    this.channelSettings = [];
+    this.imageLayer = info && !multi ? makeTileLayer(info, this.stats, "", this.opts.tiles ?? TILE_PRESETS.tuned) : null;
     this.render();
     if (!info) return;
     const fit = this.fitZoom();
@@ -125,6 +133,20 @@ export class Viewer {
     }
     this.labels = next;
     this.render();
+  }
+
+  /** How the channels of a multichannel image are shown (one entry per channel). */
+  setChannels(settings: ChannelSetting[]) {
+    if (settings.length && settings.length !== this.info?.channels.length) return; // another image's
+    this.channelSettings = settings;
+    this.render();
+  }
+
+  /** Values of the shown channels under a level-0 point (multichannel images). */
+  channelsAt(x: number, y: number): { channel: number; value: number }[] {
+    if (!this.channels) return [];
+    const level = Math.max(0, Math.floor(-(this.vs.zoom as number) + 1e-9));
+    return this.channels.valuesAt(x, y, level, this.channelSettings);
   }
 
   /** Label values under a level-0 point, for visible maps (top first). */
@@ -192,6 +214,7 @@ export class Viewer {
 
   private render() {
     const layers: Layer[] = this.imageLayer ? [this.imageLayer] : [];
+    if (this.channels) layers.push(...this.channels.layers(this.channelSettings));
     for (const { source, style } of this.labels.values()) layers.push(source.layer(style));
     const mpp = this.info?.mpp || ASSUMED_MPP, zoom = this.vs.zoom as number;
     const band = (this.band = bandAt(mpp, zoom).id);
@@ -259,6 +282,7 @@ export class Viewer {
 
   destroy() {
     for (const l of this.labels.values()) l.source.destroy();
+    this.channels?.destroy();
     for (const a of this.annotations) a.source.destroy?.();
     this.resize.disconnect();
     this.deck.finalize();
